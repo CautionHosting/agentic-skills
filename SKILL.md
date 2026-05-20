@@ -26,7 +26,7 @@ Packages: https://stagex.tools/packages/ (513 packages across Bootstrap, Core, P
 
 **Critical:** `pallet-gcc` has `ENTRYPOINT ["/usr/bin/gcc"]` — no shell. Any `RUN` using shell syntax (heredocs, `&&`, pipes) will fail. Use `pallet-gcc-gnu-busybox` for anything beyond a single compile invocation.
 
-`pallet-rust` and `pallet-go` both have a shell and `tar` but no `make`. This is fine — cargo and go handle their own build orchestration.
+`pallet-rust` (`ENTRYPOINT ["cargo"]`) and `pallet-go` both include `core-busybox` so a shell is available for `RUN` commands, but neither has `make`. This is fine — cargo and go handle their own build orchestration.
 
 ---
 
@@ -48,15 +48,24 @@ Use the `sha256:...` part in your `FROM` line. Repeat for every image used.
 
 `pallet-rust` includes Rust 1.94.0, cargo, and the `x86_64-unknown-linux-musl` target. No rustup — the musl target is pre-installed.
 
-**Static binary:**
+**Static binary (Caution-compatible):**
 ```dockerfile
 FROM stagex/pallet-rust@sha256:<digest> AS builder
+
+# Eliminate timestamp-based non-determinism
+ENV SOURCE_DATE_EPOCH=1
 
 WORKDIR /app
 COPY . .
 
-RUN RUSTFLAGS="-C target-feature=+crt-static" \
-    cargo build --release --target x86_64-unknown-linux-musl
+# --network=none enforces no network fetches at build time (required by Caution)
+# --frozen ensures Cargo.lock is not modified
+RUN --network=none \
+    RUSTFLAGS="-C target-feature=+crt-static" \
+    cargo build \
+      --frozen \
+      --release \
+      --target x86_64-unknown-linux-musl
 
 FROM stagex/core-filesystem@sha256:<digest>
 
@@ -73,11 +82,21 @@ cargo vendor vendor/
 ```
 
 ```dockerfile
+ENV SOURCE_DATE_EPOCH=1
+
 COPY . .
 COPY vendor/ vendor/
 RUN mkdir -p .cargo && printf '[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "vendor"\n' > .cargo/config.toml
-RUN RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target x86_64-unknown-linux-musl
+RUN --network=none \
+    RUSTFLAGS="-C target-feature=+crt-static" \
+    cargo build \
+      --frozen \
+      --release \
+      --target x86_64-unknown-linux-musl
 ```
+
+> **Multi-arch:** replace `x86_64` with `$(uname -m)` if building for multiple platforms:
+> `--target "$(uname -m)-unknown-linux-musl"`
 
 ---
 
@@ -85,15 +104,20 @@ RUN RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target x86
 
 `pallet-go` includes Go 1.26.0. CGO is disabled by convention for static builds.
 
-**Static binary:**
+**Static binary (Caution-compatible):**
 ```dockerfile
 FROM stagex/pallet-go@sha256:<digest> AS builder
+
+ENV SOURCE_DATE_EPOCH=1
 
 WORKDIR /app
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -ldflags="-s -w" -o myapp .
+# -mod=vendor enforces offline build from vendored modules
+# --network=none enforces no network fetches at build time (required by Caution)
+RUN --network=none \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -mod=vendor -ldflags="-s -w" -o myapp .
 
 FROM stagex/core-filesystem@sha256:<digest>
 
@@ -111,7 +135,8 @@ go mod vendor
 
 ```dockerfile
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+RUN --network=none \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -mod=vendor -ldflags="-s -w" -o myapp .
 ```
 
@@ -129,10 +154,13 @@ shasum -a 256 project-1.2.3.tar.gz   # macOS / sha256sum on Linux
 ```dockerfile
 FROM stagex/pallet-gcc-gnu-busybox@sha256:<digest> AS builder
 
+ENV SOURCE_DATE_EPOCH=1
+
 WORKDIR /build
 COPY myproject-1.2.3.tar.gz .
 
-RUN echo "<sha256>  myproject-1.2.3.tar.gz" | sha256sum -c \
+RUN --network=none \
+    echo "<sha256>  myproject-1.2.3.tar.gz" | sha256sum -c \
     && tar xzf myproject-1.2.3.tar.gz \
     && cd myproject-1.2.3 \
     && CFLAGS="-Wno-error=incompatible-pointer-types" ./configure --enable-static-bin \
@@ -186,7 +214,7 @@ docker pull stagex/<pallet-name> --platform linux/amd64
 docker inspect stagex/<pallet-name> --format '{{index .RepoDigests 0}}'
 
 # Common pallets
-stagex/pallet-rust          # Rust 1.94.0 + cargo + musl target
+stagex/pallet-rust          # Rust 1.94.0 + cargo + musl target (ENTRYPOINT = cargo)
 stagex/pallet-go            # Go 1.26.0
 stagex/pallet-gcc           # GCC 15.2.0, no shell (ENTRYPOINT = gcc)
 stagex/pallet-gcc-gnu-busybox   # GCC + make + busybox shell
@@ -211,3 +239,6 @@ docker build -f Containerfile -t myapp . --platform linux/amd64
 | Rust crates or Go modules missing at build time | Vendor deps: `cargo vendor` / `go mod vendor` |
 | Rust not targeting musl | Add `--target x86_64-unknown-linux-musl` + `RUSTFLAGS="-C target-feature=+crt-static"` |
 | Go binary has libc dependency | Set `CGO_ENABLED=0` |
+| Network access during build (Caution) | Wrap `RUN` with `--network=none` |
+| Cargo.lock mutated during build | Add `--frozen` to `cargo build` |
+| Timestamps causing non-determinism | Set `ENV SOURCE_DATE_EPOCH=1` |
