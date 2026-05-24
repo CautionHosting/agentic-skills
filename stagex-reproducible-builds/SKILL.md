@@ -14,7 +14,8 @@ Prefer current primary sources over memory:
 - StageX source: `https://codeberg.org/stagex/stagex`
 - StageX packages: `https://stagex.tools/packages/`
 - Caution docs: `https://docs.caution.co/`
-- Caution container guide: `https://docs.caution.co/guides/containerize-an-application/`
+- Caution reference: `https://docs.caution.co/reference`
+- Caution containerizing guide: `https://docs.caution.co/reference/containerizing/`
 
 Do not hardcode "latest" digests or versions from memory. StageX images are updated by release. Confirm the current digest before writing a production `FROM`.
 

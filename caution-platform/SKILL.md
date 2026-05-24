@@ -5,6 +5,16 @@ description: Use when deploying, debugging, or testing Caution enclave apps — 
 
 # Caution Platform
 
+## Source Of Truth
+
+Prefer current primary sources over memory:
+
+- Caution docs: `https://docs.caution.co/`
+- Caution reference: `https://docs.caution.co/reference`
+- Caution containerizing guide: `https://docs.caution.co/reference/containerizing/`
+- Caution debugging guide: `https://docs.caution.co/reference/debugging/`
+- Caution Procfile reference: `https://docs.caution.co/reference/procfile/`
+
 ## Overview
 
 Caution runs apps inside AWS Nitro Enclaves. The enclave boots a custom Linux kernel (`linux-nitro`) with a rootfs built by `caution apps build`, served via `eif_build`. Local debugging uses QEMU to boot the same rootfs with a swapped kernel.
