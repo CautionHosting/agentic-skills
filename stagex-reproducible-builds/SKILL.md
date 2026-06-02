@@ -77,7 +77,7 @@ Inspect the current package page or Containerfile before assuming a tool exists.
 
 Apply these rules before language-specific details:
 
-- Set `ENV SOURCE_DATE_EPOCH=1` unless the project already has a better fixed timestamp policy.
+- Set `SOURCE_DATE_EPOCH` (fixed `1`, or the commit timestamp). Setting it as `ENV` only normalizes compiler timestamps — for a deterministic OCI tarball also pass it at the buildx invocation with `rewrite-timestamp=true` (see OCI Tarball Determinism below).
 - Pin the build platform, normally `--platform linux/amd64` for Caution examples unless the user requests another target.
 - Run dependency resolution before the container build; do not fetch dependencies inside the reproducible build stage.
 - Use `RUN --network=none` for compile steps that should be hermetic.
@@ -88,40 +88,58 @@ Apply these rules before language-specific details:
 
 ## Rust Pattern
 
+> **Validation scope:** the Rust-specific flags, arch handling, and the OCI-export
+> and verification sections below have been confirmed byte-for-byte reproducible
+> only for `pallet-rust` (linux/amd64, two no-cache rebuilds compared with `cmp`).
+> The Go and C/C++ patterns have **not** been put through the same proof. Treat
+> the techniques below as Rust-validated; re-verify before claiming them for
+> other toolchains.
+
 Use `pallet-rust` for normal Cargo builds. It includes Cargo and a shell via its current pallet composition. StageX's Rust toolchain currently patches musl target defaults during toolchain build, so explicitly set static linking when the final image should contain only the binary.
 
 ```dockerfile
 FROM stagex/pallet-rust@sha256:<verified-pallet-rust-digest> AS build
-
-ENV SOURCE_DATE_EPOCH=1
-ENV RUSTFLAGS="-C target-feature=+crt-static"
+ARG TARGETARCH
 
 WORKDIR /app
-COPY . .
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
 
-RUN --network=none <<-EOF
+ENV CARGO_TARGET_DIR=/target
+ENV CARGO_INCREMENTAL=0
+ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C strip=symbols --remap-path-prefix=/app=. --remap-path-prefix=/target=target"
+
+# Resolve + download deps in a layer that is allowed network access.
+RUN triple="$([ "$TARGETARCH" = arm64 ] && echo aarch64 || echo x86_64)-unknown-linux-musl" && \
+	cargo fetch --locked --target "$triple"
+
+# Compile hermetically: no network, only the fetched/locked deps.
+RUN --network=none <<-'EOF'
 	set -eux
-	ARCH="$(uname -m)"
-	cargo build \
-		--frozen \
-		--release \
-		--target "${ARCH}-unknown-linux-musl" \
-		--bin myapp
-	cp "target/${ARCH}-unknown-linux-musl/release/myapp" /myapp
+	triple="$([ "${TARGETARCH}" = arm64 ] && echo aarch64 || echo x86_64)-unknown-linux-musl"
+	cargo build --frozen --release --target "${triple}" --bin myapp
+	install -Dm755 "/target/${triple}/release/myapp" /myapp
 EOF
 
-FROM stagex/core-filesystem@sha256:<verified-core-filesystem-digest> AS run
-COPY --from=build /myapp /app/myapp
-ENTRYPOINT ["/app/myapp"]
+FROM scratch AS run
+COPY --from=build /myapp /myapp
+ENTRYPOINT ["/myapp"]
 ```
 
-If the project uses crates from crates.io or git:
+Why these specifics matter for Rust determinism:
+
+- **`ARG TARGETARCH`, not `uname -m`.** `TARGETARCH` is the target BuildKit injects from `--platform`; it is correct even when the build runs under emulation, and it matches StageX's own `core/rust/Containerfile`. `uname -m` couples the target triple to runtime introspection of a possibly-emulated host.
+- **`CARGO_INCREMENTAL=0`.** Incremental compilation caches are a known source of non-reproducible output.
+- **`-C codegen-units=1`.** Multi-unit codegen parallelism can reorder output.
+- **`--remap-path-prefix`.** Removes absolute build paths embedded in the binary (the "absolute host paths" hazard in the determinism rules).
+- **`-C strip=symbols`.** Drops symbol tables that can carry build-host detail.
+- **`cargo fetch --locked` then `cargo build --frozen --network=none`.** A network-allowed fetch layer followed by a hermetic compile layer. `Cargo.lock` pins versions and checksums, so the fetch is reproducible without committing a `vendor/` dir.
+
+Stricter offline alternative — commit a vendored tree instead of fetching:
 
 ```bash
-cargo vendor vendor/
+cargo vendor vendor/   # then commit Cargo.lock, vendor/, .cargo/config.toml
 ```
-
-Commit `Cargo.lock`, `vendor/`, and `.cargo/config.toml`, or create `.cargo/config.toml` in the build context before `RUN --network=none`:
 
 ```toml
 [source.crates-io]
@@ -132,6 +150,56 @@ directory = "vendor"
 ```
 
 For Rust reproducibility issues, check for `build.rs` scripts embedding timestamps, host paths, `git describe`, or CPU-specific codegen. Keep `codegen-units`, target, and feature flags stable across reproductions.
+
+## OCI Tarball Determinism (buildx, Rust-validated)
+
+Setting `SOURCE_DATE_EPOCH` in the Containerfile normalizes timestamps the
+*compiler* writes, but it does **not** normalize the layer timestamps in an
+exported OCI tarball. To get a bit-identical tarball, pass the epoch at the
+buildx invocation and let buildx rewrite layer timestamps:
+
+```bash
+SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct) docker buildx build \
+	--platform linux/amd64 \
+	--target run \
+	--output type=oci,dest=dist/myapp.oci.tar,rewrite-timestamp=true \
+	-f Containerfile .
+```
+
+Timestamp policy — two valid choices:
+
+- **Fixed epoch (`SOURCE_DATE_EPOCH=1`):** simplest; every build of unchanged
+  inputs is identical regardless of commit. Good default.
+- **Commit-timestamp epoch (`git log -1 --pretty=%ct`):** ties each artifact to
+  its source commit, so every commit yields a distinct but deterministic
+  artifact. Record the expected hashes per commit
+  (`checksums/sha256sums-<gitrev>.txt`). Reproduce by checking out the **exact
+  source commit** named in the checksum file — a later commit that only records
+  checksums gets a new timestamp and therefore a different artifact, so verify
+  from the source commit, not the repository tip. Tag published commits so
+  releases have a stable pointer.
+
+## Verifying Reproducibility (Rust-validated)
+
+A reproducibility claim needs evidence, not assertion. The strong check is two
+independent no-cache builds compared byte-for-byte:
+
+```bash
+EPOCH=$(git log -1 --pretty=%ct)
+for d in a b; do
+	SOURCE_DATE_EPOCH=$EPOCH docker buildx build --no-cache \
+		--platform linux/amd64 --target run \
+		--output type=oci,dest=/tmp/repro-$d/myapp.oci.tar,rewrite-timestamp=true \
+		-f Containerfile .
+done
+cmp /tmp/repro-a/myapp.oci.tar /tmp/repro-b/myapp.oci.tar \
+	&& echo REPRODUCIBLE
+```
+
+Confirm both passes actually recompiled (grep the build log for the compile
+step, not `CACHED`) — otherwise the second build proved nothing. Once proven,
+record the hash and gate future rebuilds against it (`shasum -a 256 -c`),
+failing non-zero on any mismatch.
 
 ## Go Pattern
 
@@ -239,8 +307,12 @@ Flag these as correctness issues:
 - Floating `FROM stagex/...` in production snippets.
 - Hardcoded digest copied from stale docs without verification.
 - `cargo build` without `--frozen` or vendored dependencies.
+- `cargo`/Rust build selecting the target triple from `uname -m` instead of `ARG TARGETARCH`.
+- Rust build missing `CARGO_INCREMENTAL=0` or `-C codegen-units=1` when reproducibility is required.
 - `go build` without `-mod=vendor`, `-trimpath`, or `-buildid=`.
 - Network access during compile.
 - `COPY . .` before generating or checking lockfiles.
+- OCI tarball export without `rewrite-timestamp=true` (or `SOURCE_DATE_EPOCH` not passed at the buildx invocation) — the binary may be deterministic while the tarball is not.
+- A "reproducible" claim with no two-build `cmp` (or equivalent) evidence.
 - Runtime images that inherit `stagex/core-filesystem` shell entrypoint.
 - Claims that attestation proves source provenance without reproducible rebuild and PCR comparison.
