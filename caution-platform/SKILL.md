@@ -49,8 +49,8 @@ Caution builds with `docker build -f <containerfile> .` from the repo root. It n
 
 ### Networking
 
-- `ports` — comma-separated ports to expose, e.g. `ports: 8232, 8233`. Must match the ports the app listens on (and the `hostfwd` rules used for local QEMU). Do **not** use the reserved `49500`–`49600` range.
-- `http_port` — a single port Caution fronts with Caddy for TLS termination. Pair with `domain`.
+- `ports` — comma-separated string of ports to expose, e.g. `ports: 8232, 8233`. **Not a YAML array** — `ports: [8080]` is wrong; use `ports: 8080`. Must match the ports the app listens on (and the `hostfwd` rules used for local QEMU). Do **not** use the reserved `49500`–`49600` range.
+- `http_port` — a single port Caution fronts with Caddy for TLS termination. Pair with `domain`. **The `http_port` value must also appear in `ports`** — Caution push validation rejects the Procfile otherwise (`Invalid Procfile: http_port X must also be listed in ports`).
 - `domain` — domain name for the deployment.
 
 ### Resources
@@ -245,6 +245,7 @@ cat /var/log/user-data.log                               # full boot + provision
 | `Enclave failed to start` | Insufficient memory/CPU, or EIF failed to download from S3 | Check `nitro-enclaves-allocator.service` and `nitro-enclave.service` |
 | App unreachable | vsock proxy not running for that port | `systemctl status vsock-proxy-<port>.service` |
 | App unreachable, port not in `ports` | Port the app listens on is missing from the Procfile `ports` list | Add the port to `ports` (and `hostfwd` for local QEMU) |
+| `Invalid Procfile: http_port X must also be listed in ports` | `http_port` was set but `ports` was omitted or doesn't include that same port number | Add `ports: X` (or include X in the ports list) alongside `http_port: X` |
 | `caution verify` fails after debug deploy | PCRs are zeroed in debug mode | Remove `debug: true`, redeploy |
 | Port forwarding not working in QEMU | `pci=off` in kernel cmdline, or Nitro kernel (no virtio-net driver) | Use standard kernel, remove `pci=off` |
 | App image build fails with `wget: error getting response: Connection reset by peer` | busybox `wget` has no TLS — can't fetch `https://` URLs inside a stagex pallet | Vendor the tarball locally: `curl -sL <url> -o file.tar.gz`, commit it, use `COPY file.tar.gz .` instead of `wget` in the Containerfile |
