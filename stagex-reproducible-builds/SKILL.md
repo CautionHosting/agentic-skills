@@ -201,6 +201,66 @@ step, not `CACHED`) — otherwise the second build proved nothing. Once proven,
 record the hash and gate future rebuilds against it (`shasum -a 256 -c`),
 failing non-zero on any mismatch.
 
+## Node.js / npm Pattern
+
+> **Reproducibility status:** Node.js builds are the hardest to make deterministic. The approach below reduces non-determinism but `npm` installs are not byte-for-bit reproducible across environments without additional tooling (e.g. pnpm with a content-addressed store). Treat this pattern as best-effort unless you can prove two independent `--no-cache` builds are identical.
+
+Use `pallet-nodejs`. The key non-determinism sources are:
+- `npm install` embeds timestamps in `package-lock.json` and writes mutable data to `node_modules/`
+- Build tools (webpack, esbuild, etc.) may embed timestamps, random IDs, or sort file lists by filesystem mtime
+- `SOURCE_DATE_EPOCH` is not honoured by most JS build tools unless they explicitly opt in (most don't)
+
+**Mitigations:**
+
+```dockerfile
+FROM stagex/pallet-nodejs@sha256:<verified-pallet-nodejs-digest> AS build
+
+ENV SOURCE_DATE_EPOCH=1
+# Some JS bundlers respect SOURCE_DATE_EPOCH if set; set it anyway.
+
+WORKDIR /app
+
+# Commit package-lock.json and copy it before anything else.
+# npm ci installs exactly what's in the lockfile — do NOT use npm install here.
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts
+
+COPY . .
+RUN npm run build
+
+FROM scratch AS run
+COPY --from=build /app/dist /app/dist
+```
+
+Key rules:
+- **Use `npm ci`, never `npm install`.** `npm install` can modify `package-lock.json` and resolve floating ranges; `npm ci` uses the lockfile exactly.
+- **Commit `package-lock.json`.** Without it, dependency resolution is non-deterministic.
+- **`--ignore-scripts` where possible.** `postinstall` scripts are common sources of non-reproducibility.
+- **Avoid `.npmrc` cache paths that embed hostname or username.**
+- **Do not use `npm pack` or publish step** that reads wall-clock time.
+
+**Red flags in a Node.js Containerfile:**
+- `RUN npm install` (not `npm ci`)
+- No `package-lock.json` (or it's in `.gitignore`)
+- `COPY . .` before copying lockfile (busts lockfile layer independently of source changes)
+- `npm run build` without `SOURCE_DATE_EPOCH` set (output may embed build timestamps from webpack/esbuild)
+- `wget` or `curl` inside the build (busybox `wget` has no TLS — use vendored files)
+
+If an app's Containerfile uses `npm install && npm run build` without `SOURCE_DATE_EPOCH=1`, `caution verify` may produce a mismatched PCR — though this is hard to isolate from other causes (e.g. the deployed enclave being built from a different commit than what the manifest declares). Always rule out commit mismatch first.
+
+### Fallback: vendor the prebuilt frontend, reproducibly build only the server
+
+When the frontend is a static client-side SPA (Vite/React/etc.) and you cannot yet prove its JS build is byte-for-byte reproducible, a pragmatic v1 is to **build the SPA outside the enclave, commit the built `dist/` to git, and reproducibly build only the server** (a Go/Rust binary that `embed`s the committed static tree). The StageX stage then compiles just the binary — deterministic and fast — and reads the static assets verbatim.
+
+This is a real, shippable pattern, but be explicit about what it does and does **not** attest:
+
+- `caution verify` proves the **server binary** matches source, and that the binary embeds **whatever bytes are committed** at the attested commit.
+- It does **not** prove those committed bytes are the faithful build output of the frontend source (`apps/**`). You are trusting the committed `dist/` (and whatever CI regenerates it), not attesting it.
+
+Use it when JS determinism isn't proven yet; flag it as a v1 trade-off. The v2 is to move the SPA build into a `stagex/pallet-nodejs`/`pallet-bun` stage (`*ci`/frozen-lockfile install + bundler build with `SOURCE_DATE_EPOCH=1`), `COPY --from=` the result into the server stage so the whole artifact is built hermetically, and prove it with the same two-build `cmp` check used for the binary. The blocker to v2 is always JS bundler determinism — don't claim it without the `cmp` evidence.
+
+Costs to call out for the v1: the repo carries churning content-hashed build artifacts (history/diff bloat), and the vendored tree can drift if hand-edited or if CI is bypassed.
+
 ## Go Pattern
 
 Use `pallet-go`; StageX configures Go with deterministic defaults such as `SOURCE_DATE_EPOCH=1`, `GOTOOLCHAIN=local`, and `LDFLAGS="-w -s -buildid="`, but keep explicit flags in application builds.
@@ -314,6 +374,9 @@ Flag these as correctness issues:
 - `cargo`/Rust build selecting the target triple from `uname -m` instead of `ARG TARGETARCH`.
 - Rust build missing `CARGO_INCREMENTAL=0` or `-C codegen-units=1` when reproducibility is required.
 - `go build` without `-mod=vendor`, `-trimpath`, or `-buildid=`.
+- `npm install` instead of `npm ci` in a Node.js build.
+- Node.js build with no committed `package-lock.json`.
+- JS bundler step without `SOURCE_DATE_EPOCH=1` (output may embed timestamps).
 - Network access during compile.
 - `COPY . .` before generating or checking lockfiles.
 - OCI tarball export without `rewrite-timestamp=true` (or `SOURCE_DATE_EPOCH` not passed at the buildx invocation) — the binary may be deterministic while the tarball is not.

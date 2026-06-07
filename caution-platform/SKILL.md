@@ -25,6 +25,33 @@ Two files define a Caution app:
 - **`Containerfile`** — the reproducible build recipe. Authored with the `stagex-reproducible-builds` skill.
 - **`Procfile`** — tells Caution how to run the resulting image. Covered below.
 
+## CLI command surface
+
+Verified against the `caution` CLI (subcommands: `register`, `login`, `logout`, `init`, `teardown`, `verify`, `apps`, `ssh-keys`, `cache`, `credentials`, `secret`). There is **no `caution apps push`** and **no `deploy` subcommand** — don't invent them. `apps` has exactly: `create`, `list`, `get`, `destroy`, `build`, `rename`.
+
+Deploy flow from a repo containing a `Procfile` + `Containerfile`:
+
+```bash
+caution login           # (or `register` first) — FIDO2/WebAuthn, interactive
+caution init            # initialize the deployment in the cwd; writes .caution/
+caution apps build      # OPTIONAL: build the EIF locally to inspect it — does NOT deploy
+caution apps create     # create + deploy the app
+caution verify --attestation-url https://<domain>/attestation   # reproduce & compare PCRs
+```
+
+Key points:
+- `caution apps build` is **local inspection only** (build the enclave image to look at it / QEMU-debug it). It is not a deploy step.
+- Deploy is `caution init` then `caution apps create`.
+- These commands are **interactive** (FIDO2 signing) — wrapping them in a Makefile/CI adds little and can't be fully automated. Keep ops Makefiles to local build/test/reproducibility (`go build`, `vite build`, the two-build `cmp` repro check) and run the `caution` commands directly.
+- `.caution/` is local CLI state/build output — add it to `.gitignore`.
+
+### Deploy is per-branch — keep `Procfile` + `Containerfile` at the repo root
+
+Caution deploys a **specific git branch** (it reports e.g. `Deploying branch 'main' at <sha>`) and looks for a **root `Procfile`** on *that* branch. Two consequences that bite in practice:
+
+- **Put both files at the repo root**, not in a subdir. The `Procfile` *must* be at the root. The `Containerfile` is best at the root too: omit the `containerfile:` key and let Caution auto-detect a root `Containerfile` (before `Dockerfile`). A subpath like `containerfile: deploy/Containerfile` is supported but more fragile — root + auto-detect is the reliable convention. The Docker build context is the repo root regardless, so a root `Containerfile` can still `COPY deploy/ ...`.
+- **Deploy the branch that actually carries these files.** Pushing a branch without them (e.g. a bare `main` while the work lives on a feature branch) fails with `error: No Procfile found in repository root`. Either merge the feature branch to the deployed branch first, or push the feature branch to the deploy ref (`git push caution <feature>:main`).
+
 ## Procfile
 
 The `Procfile` is a key-value file (one `key: value` per line) at the repo root. It tells Caution how to run the app, which build recipe to use, and what metadata to publish. The Containerfile builds the image; the Procfile launches it.
@@ -50,7 +77,7 @@ Caution builds with `docker build -f <containerfile> .` from the repo root. It n
 ### Networking
 
 - `ports` — comma-separated string of ports to expose, e.g. `ports: 8232, 8233`. **Not a YAML array** — `ports: [8080]` is wrong; use `ports: 8080`. Must match the ports the app listens on (and the `hostfwd` rules used for local QEMU). Do **not** use the reserved `49500`–`49600` range.
-- `http_port` — a single port Caution fronts with Caddy for TLS termination. Pair with `domain`. **The `http_port` value must also appear in `ports`** — Caution push validation rejects the Procfile otherwise (`Invalid Procfile: http_port X must also be listed in ports`).
+- `http_port` — a single port Caution fronts with Caddy for TLS termination. Pair with `domain`. **The `http_port` value must also appear in `ports`** — Caution's Procfile validation (at `apps create`) rejects it otherwise (`Invalid Procfile: http_port X must also be listed in ports`).
 - `domain` — domain name for the deployment.
 
 ### Resources
@@ -209,7 +236,7 @@ Expected warnings in logs — not errors:
 
 ### Enable debug mode
 
-Add to `Procfile` before pushing:
+Add to `Procfile` before deploying (`apps create`):
 ```procfile
 debug: true
 ssh_keys: "ssh-ed25519 AAAA... you@host"
@@ -237,6 +264,40 @@ cat /var/log/nitro_enclaves/nitro_enclaves.log           # nitro-cli errors
 cat /var/log/user-data.log                               # full boot + provisioning log
 ```
 
+## caution verify and PCR Debugging
+
+`caution verify --attestation-url <url>` fetches the live attestation manifest, re-downloads the app source at the **declared commit**, rebuilds the EIF, and compares PCR0/PCR1 against the attestation. A mismatch means the reproduced build differs from the deployed one.
+
+### What the attestation manifest does and does NOT contain
+
+The `EnclaveManifest` embedded in the attestation records:
+- `app_source` — URL, commit SHA, branch
+- `enclave_source`, `framework_source` — with pinned commits
+- `run_command`, `enclaveos_commit`, `bootproof_commit`, `steve_commit`
+
+It does **not** store `ports` or `e2e`. During verification, `caution verify` re-reads the app source's `Procfile` at the declared commit to recover these values — they drive `run.sh` generation (STEVE inclusion, VSOCK port proxies). If the re-read is skipped or wrong, `run.sh` differs → PCR mismatch.
+
+### PCR mismatch — ordered diagnosis
+
+1. **Wrong dev branch / wrong CLI build.** Ensure the CLI was built from the correct branch. If using Docker-based `make install-cli`, add `NO_CACHE=--no-cache` to force a rebuild from source.
+2. **`run.sh` is wrong.** Inspect the cached `run.sh`: `cat ~/.cache/caution/reproductions/local/<app_commit>/eif-stage/run.sh`. Confirm it has the STEVE block and correct VSOCK port proxies matching the deployed app's `Procfile`. If not, the ports/e2e re-read from the Procfile isn't working.
+3. **Deployed enclave was built from a different commit** than what the manifest declares. The manifest's `app_source.commit` may be stale — the deploy may have used a different branch state, a force-push, or a rebuild without updating the manifest. Try building from nearby commits on the same branch to find the actual source that matches the deployed PCR.
+4. **Non-deterministic user app build.** If the app Containerfile runs `npm install && npm run build` without `SOURCE_DATE_EPOCH=1`, or fetches mutable content, the output differs between builds. See the `stagex-reproducible-builds` skill for remediation.
+
+### Cache paths for debugging
+
+```
+~/.cache/caution/downloads/{sha256_of_url}/          # downloaded app source
+~/.cache/caution/reproductions/local/{app_commit}/   # EIF reproduction
+~/.cache/caution/reproductions/local/{app_commit}/eif-stage/run.sh       # inspect this
+~/.cache/caution/reproductions/local/{app_commit}/eif-stage/manifest.json
+```
+
+Clear the reproduction cache to force a full rebuild:
+```bash
+rm -rf ~/.cache/caution/reproductions/local/<app_commit>/
+```
+
 ## Common Failures
 
 | Symptom | Cause | Fix |
@@ -250,3 +311,4 @@ cat /var/log/user-data.log                               # full boot + provision
 | Port forwarding not working in QEMU | `pci=off` in kernel cmdline, or Nitro kernel (no virtio-net driver) | Use standard kernel, remove `pci=off` |
 | App image build fails with `wget: error getting response: Connection reset by peer` | busybox `wget` has no TLS — can't fetch `https://` URLs inside a stagex pallet | Vendor the tarball locally: `curl -sL <url> -o file.tar.gz`, commit it, use `COPY file.tar.gz .` instead of `wget` in the Containerfile |
 | `no match for platform in manifest: not found` during `caution apps build` | StageX images are linux/amd64 only; on an arm64 host (e.g. Apple Silicon) the builder defaults to arm64 | Build inside an amd64 environment, or add `--platform=linux/amd64` to every `FROM` line in the Containerfile: `FROM --platform=linux/amd64 stagex/...` |
+| buildx lint warning `FromPlatformFlagConstDisallowed: FROM --platform flag should not use constant value "linux/amd64"` | You pinned `--platform=linux/amd64` on `FROM` (the fix above) | **Benign — don't "fix" it.** The constant pin is deliberate for amd64-only StageX images; it prevents the arm64 default footgun. The build proceeds and stays reproducible. |
