@@ -1,6 +1,6 @@
 # Enclave Dev Skills
 
-Claude Code skills for building and debugging apps on the [Caution](https://caution.co) verifiable enclave platform.
+Claude Code and Codex skills for building and debugging apps on the [Caution](https://caution.co) verifiable enclave platform.
 
 ## Skills
 
@@ -23,12 +23,26 @@ Write the Caution `Procfile`, and deploy/debug enclave apps locally and on AWS N
 - Attestation endpoint testing (`/attestation` request format, expected errors)
 - Production health check failures, SSH debug mode, vsock and service logs
 
-## Install
+## Install For Claude Code
 
 ```bash
 for skill in stagex-reproducible-builds caution-platform; do
   mkdir -p ~/.claude/skills/$skill
   curl -sL https://raw.githubusercontent.com/vkobel/enclave-dev-skills/main/$skill/SKILL.md \
     -o ~/.claude/skills/$skill/SKILL.md
+done
+```
+
+## Install For Codex
+
+Clone this repo, then copy the skill folders into `~/.codex/skills` so Codex can discover both `SKILL.md` and `agents/openai.yaml`:
+
+```bash
+git clone https://github.com/vkobel/enclave-dev-skills.git
+cd enclave-dev-skills
+
+for skill in stagex-reproducible-builds caution-platform; do
+  mkdir -p ~/.codex/skills/$skill
+  cp -R $skill/. ~/.codex/skills/$skill/
 done
 ```
