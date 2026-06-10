@@ -298,6 +298,52 @@ Clear the reproduction cache to force a full rebuild:
 rm -rf ~/.cache/caution/reproductions/local/<app_commit>/
 ```
 
+## Locksmith (`caution secret new`)
+
+`caution secret new keyring.asc --threshold N --max N` calls the keymaker service to mint a quorum bundle. It requires each OpenPGP certificate in the keyring to have **both** an encryption subkey and an authentication subkey.
+
+Default `gpg --full-generate-key` on macOS (and Linux) produces only a certify primary + encryption subkey — no auth subkey:
+
+```
+pub  ed25519  [SC]
+sub  cv25519  [E]      ← present
+                       ← authentication subkey missing → "keyring contains no Keymaker-eligible public certificates"
+```
+
+To add an authentication subkey (must be done for every shard-holder key):
+
+```bash
+gpg --expert --edit-key alice@example.com
+# gpg> addkey
+# → (11) ECC (set your own capabilities)
+# → toggle Sign OFF, Authenticate ON, then Q
+# → Curve 25519, no expiry
+# gpg> save
+```
+
+Verify before exporting:
+```bash
+gpg --list-keys --with-colons alice@example.com | grep '^sub'
+# must show both:  sub … e … cv25519   (encryption)
+#                  sub … a … ed25519   (authentication)
+```
+
+Export to keyring:
+```bash
+gpg --armor --export alice@example.com bob@example.com > keyring.asc
+caution secret new keyring.asc --threshold 2 --max 2   # writes .caution/quorum-bundle.json
+```
+
+The public key for encrypting secrets is in the `public_key` field of the bundle:
+```bash
+jq -r '.public_key' .caution/quorum-bundle.json > recipient.asc
+printf '%s' "$MY_SECRET" | gpg --batch --yes --trust-model always \
+  --encrypt --armor --recipient-file recipient.asc \
+  --output ".caution/secrets/MY_SECRET.asc"
+```
+
+`.caution/quorum-bundle.json` and `.caution/secrets/*.asc` are safe to commit (encrypted to the enclave-only key).
+
 ## Common Failures
 
 | Symptom | Cause | Fix |
@@ -310,5 +356,6 @@ rm -rf ~/.cache/caution/reproductions/local/<app_commit>/
 | `caution verify` fails after debug deploy | PCRs are zeroed in debug mode | Remove `debug: true`, redeploy |
 | Port forwarding not working in QEMU | `pci=off` in kernel cmdline, or Nitro kernel (no virtio-net driver) | Use standard kernel, remove `pci=off` |
 | App image build fails with `wget: error getting response: Connection reset by peer` | busybox `wget` has no TLS — can't fetch `https://` URLs inside a stagex pallet | Vendor the tarball locally: `curl -sL <url> -o file.tar.gz`, commit it, use `COPY file.tar.gz .` instead of `wget` in the Containerfile |
+| `keyring contains no Keymaker-eligible public certificates` during `caution secret new` | Default GPG keys lack an authentication subkey | Add an auth subkey: `gpg --expert --edit-key <email>` → `addkey` → option 11 (ECC, set your own capabilities) → toggle Sign OFF, Auth ON → save. See Locksmith section above. |
 | `no match for platform in manifest: not found` during `caution apps build` | StageX images are linux/amd64 only; on an arm64 host (e.g. Apple Silicon) the builder defaults to arm64 | Build inside an amd64 environment, or add `--platform=linux/amd64` to every `FROM` line in the Containerfile: `FROM --platform=linux/amd64 stagex/...` |
 | buildx lint warning `FromPlatformFlagConstDisallowed: FROM --platform flag should not use constant value "linux/amd64"` | You pinned `--platform=linux/amd64` on `FROM` (the fix above) | **Benign — don't "fix" it.** The constant pin is deliberate for amd64-only StageX images; it prevents the arm64 default footgun. The build proceeds and stays reproducible. |

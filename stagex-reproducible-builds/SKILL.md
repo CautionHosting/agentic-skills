@@ -98,8 +98,7 @@ Apply these rules before language-specific details:
 Use `pallet-rust` for normal Cargo builds. It includes Cargo and a shell via its current pallet composition. StageX's Rust toolchain currently patches musl target defaults during toolchain build, so explicitly set static linking when the final image should contain only the binary.
 
 ```dockerfile
-FROM stagex/pallet-rust@sha256:<verified-pallet-rust-digest> AS build
-ARG TARGETARCH
+FROM --platform=linux/amd64 stagex/pallet-rust@sha256:<verified-pallet-rust-digest> AS build
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -110,13 +109,13 @@ ENV CARGO_INCREMENTAL=0
 ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C strip=symbols --remap-path-prefix=/app=. --remap-path-prefix=/target=target"
 
 # Resolve + download deps in a layer that is allowed network access.
-RUN triple="$([ "$TARGETARCH" = arm64 ] && echo aarch64 || echo x86_64)-unknown-linux-musl" && \
-	cargo fetch --locked --target "$triple"
+# Use uname -m (not ARG TARGETARCH) — see note below.
+RUN cargo fetch --locked --target "$(uname -m)-unknown-linux-musl"
 
 # Compile hermetically: no network, only the fetched/locked deps.
 RUN --network=none <<-'EOF'
 	set -eux
-	triple="$([ "${TARGETARCH}" = arm64 ] && echo aarch64 || echo x86_64)-unknown-linux-musl"
+	triple="$(uname -m)-unknown-linux-musl"
 	cargo build --frozen --release --target "${triple}" --bin myapp
 	install -Dm755 "/target/${triple}/release/myapp" /myapp
 EOF
@@ -128,7 +127,7 @@ ENTRYPOINT ["/myapp"]
 
 Why these specifics matter for Rust determinism:
 
-- **`ARG TARGETARCH`, not `uname -m`.** `TARGETARCH` is the target BuildKit injects from `--platform`; it is correct even when the build runs under emulation, and it matches StageX's own `core/rust/Containerfile`. `uname -m` couples the target triple to runtime introspection of a possibly-emulated host.
+- **`uname -m`, not `ARG TARGETARCH`, for StageX amd64 builds.** StageX images are linux/amd64 only, so every `FROM` carries `--platform=linux/amd64`. Inside that container `uname -m` reliably returns `x86_64`. `TARGETARCH`, by contrast, is injected from the *outer* `docker build` invocation's platform — on an Apple Silicon Mac running `caution apps build`, `TARGETARCH=arm64` even though the container is amd64, causing `cargo fetch` to resolve aarch64 deps and the offline `cargo build` to fail looking for x86_64 crates. A second failure mode: `cargo fetch --locked --target aarch64-...` skips build-script host deps (e.g. `blake3 → cpufeatures`) that `cargo build` later needs on the x86_64 host — `uname -m` keeps fetch and build aligned so this can't happen.
 - **`CARGO_INCREMENTAL=0`.** Incremental compilation caches are a known source of non-reproducible output.
 - **`-C codegen-units=1`.** Multi-unit codegen parallelism can reorder output.
 - **`--remap-path-prefix`.** Removes absolute build paths embedded in the binary (the "absolute host paths" hazard in the determinism rules).
@@ -371,7 +370,7 @@ Flag these as correctness issues:
 - Floating `FROM stagex/...` in production snippets.
 - Hardcoded digest copied from stale docs without verification.
 - `cargo build` without `--frozen` or vendored dependencies.
-- `cargo`/Rust build selecting the target triple from `uname -m` instead of `ARG TARGETARCH`.
+- `ARG TARGETARCH` used for the Rust triple in a StageX amd64 build — on macOS `TARGETARCH=arm64` even with `FROM --platform=linux/amd64`, causing fetch/build arch mismatch. Use `uname -m` instead.
 - Rust build missing `CARGO_INCREMENTAL=0` or `-C codegen-units=1` when reproducibility is required.
 - `go build` without `-mod=vendor`, `-trimpath`, or `-buildid=`.
 - `npm install` instead of `npm ci` in a Node.js build.
