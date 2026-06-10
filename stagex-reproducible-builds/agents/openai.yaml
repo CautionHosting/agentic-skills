@@ -1,0 +1,4 @@
+interface:
+  display_name: "StageX Reproducible Builds"
+  short_description: "Author verifiable StageX container builds"
+  default_prompt: "Use $stagex-reproducible-builds to create or review a reproducible StageX Containerfile."
