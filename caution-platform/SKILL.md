@@ -27,7 +27,7 @@ Two files define a Caution app:
 
 ## CLI command surface
 
-Verified against the `caution` CLI (subcommands: `register`, `login`, `logout`, `init`, `teardown`, `verify`, `apps`, `ssh-keys`, `cache`, `credentials`, `secret`). There is **no `caution apps push`** and **no `deploy` subcommand** — don't invent them. `apps` has exactly: `create`, `list`, `get`, `destroy`, `build`, `rename`.
+Verified against the `caution` CLI (subcommands: `register`, `login`, `logout`, `init`, `teardown`, `verify`, `apps`, `ssh-keys`, `cache`, `credentials`, `secret`). There is **no `caution apps push`** and **no `deploy` subcommand** — don't invent them. `apps` has exactly: `create`, `list`, `get`, `destroy`, `build`, `rename`, `download-eif`.
 
 Deploy flow from a repo containing a `Procfile` + `Containerfile`:
 
@@ -43,7 +43,7 @@ Key points:
 - `caution apps build` is **local inspection only** (build the enclave image to look at it / QEMU-debug it). It is not a deploy step.
 - Deploy is `caution init` then `caution apps create`.
 - These commands are **interactive** (FIDO2 signing) — wrapping them in a Makefile/CI adds little and can't be fully automated. Keep ops Makefiles to local build/test/reproducibility (`go build`, `vite build`, the two-build `cmp` repro check) and run the `caution` commands directly.
-- `.caution/` is local CLI state/build output — add it to `.gitignore`.
+- **Commit** `.caution/deployment.json` (app resource ID, needed for CLI to target the right app), `.caution/quorum-bundle.json`, and `.caution/secrets/*.asc`. **Do not commit** plaintext inputs (`.env`) or generated private keyrings (e.g. `alice.private.asc`). Build output (EIF files) should remain gitignored.
 
 ### Deploy is per-branch — keep `Procfile` + `Containerfile` at the repo root
 
@@ -283,6 +283,35 @@ It does **not** store `ports` or `e2e`. During verification, `caution verify` re
 2. **`run.sh` is wrong.** Inspect the cached `run.sh`: `cat ~/.cache/caution/reproductions/local/<app_commit>/eif-stage/run.sh`. Confirm it has the STEVE block and correct VSOCK port proxies matching the deployed app's `Procfile`. If not, the ports/e2e re-read from the Procfile isn't working.
 3. **Deployed enclave was built from a different commit** than what the manifest declares. The manifest's `app_source.commit` may be stale — the deploy may have used a different branch state, a force-push, or a rebuild without updating the manifest. Try building from nearby commits on the same branch to find the actual source that matches the deployed PCR.
 4. **Non-deterministic user app build.** If the app Containerfile runs `npm install && npm run build` without `SOURCE_DATE_EPOCH=1`, or fetches mutable content, the output differs between builds. See the `stagex-reproducible-builds` skill for remediation.
+
+### EIF filesystem comparison (deeper diagnosis)
+
+When the ordered steps above don't identify the cause, compare the local and deployed EIF filesystems directly using `diffoscope`:
+
+```bash
+# 1. Build locally
+caution apps build
+# EIF is at: eif-stage/output/enclave.eif
+
+# 2. Download the deployed EIF
+caution apps download-eif
+# Saves the deployed EIF locally (filename shown in output)
+
+# 3. Extract both filesystems — find the second gzip entry offset in each
+mkdir /tmp/local-extract /tmp/deployed-extract
+binwalk eif-stage/output/enclave.eif
+# Note the offset of the second gzip entry, then:
+cd /tmp/local-extract
+dd if=/path/to/enclave.eif bs=1 skip=<offset> | zcat | cpio --no-absolute-filenames -idmv
+
+cd /tmp/deployed-extract
+dd if=/path/to/downloaded.eif bs=1 skip=<offset> | zcat | cpio --no-absolute-filenames -idmv
+
+# 4. Compare
+diffoscope /tmp/local-extract/ /tmp/deployed-extract/
+```
+
+`diffoscope` produces a detailed report of every difference — file additions, removals, content diffs, permission differences.
 
 ### Cache paths for debugging
 

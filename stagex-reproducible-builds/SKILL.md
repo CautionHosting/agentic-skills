@@ -319,6 +319,26 @@ EOF
 
 StageX has no runtime package manager inside pallets. If a library is missing, either disable that feature or add/build the dependency explicitly with pinned StageX `core-*` images or vendored source.
 
+## Public Environment Variables in Multi-Stage Builds
+
+For public (non-secret) runtime configuration, write to `/etc/environment` — the enclave runtime sources this file on startup. In a multi-stage build, the builder stage's filesystem is discarded; you must explicitly copy the file into the final stage:
+
+```dockerfile
+FROM stagex/pallet-rust AS build
+# Build the application and prepare public runtime config.
+RUN printf '%s\n' \
+  'APP_PORT=3000' \
+  'LOG_LEVEL=info' \
+  > /tmp/environment
+
+FROM stagex/core-filesystem AS run
+COPY --from=build /tmp/environment /etc/environment
+COPY --from=build /myapp /app/myapp
+ENTRYPOINT ["/app/myapp"]
+```
+
+For secrets, use Locksmith instead — see the `caution-platform` skill.
+
 ## Runtime Base
 
 Use one of these patterns:
