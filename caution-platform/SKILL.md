@@ -1,6 +1,6 @@
 ---
 name: caution-platform
-description: Use when writing a Caution Procfile, or deploying, debugging, or testing Caution enclave apps — locally with QEMU (on a Linux host, or inside a Linux amd64 VM on macOS), or on AWS Nitro (health check failures, attestation errors, vsock issues, SSH debug mode, nitro-cli, service logs).
+description: Use when writing a Caution Procfile, or deploying, debugging, or testing Caution enclave apps — locally with QEMU (on a Linux host, or inside a Linux amd64 VM on macOS), or on AWS Nitro (health check failures, attestation errors, vsock issues, SSH debug mode, nitro-cli, service logs). Covers the full CLI surface, deploy flow (git push caution main), BYOC provisioning, Locksmith secret management, STEVE end-to-end encryption, and PCR verification.
 ---
 
 # Caution Platform
@@ -14,9 +14,22 @@ Prefer current primary sources over memory:
 - Caution Procfile reference: `https://docs.caution.co/reference/procfile/`
 - Caution containerizing guide: `https://docs.caution.co/guides/containerize-an-application/`
 - Caution debugging guide: `https://docs.caution.co/reference/debugging/`
+- Caution key services guide: `https://docs.caution.co/concepts/key-services/`
 - Caution platform source: `https://codeberg.org/caution/platform`
+- Locksmith source: `https://codeberg.org/caution/locksmith`
+- STEVE source: `https://git.distrust.co/public/steve`
+- EnclaveOS source: `https://git.distrust.co/public/enclaveos`
+- Keyfork source: `https://git.distrust.co/public/keyfork`
 
 ## Overview
+
+Caution is a general-purpose, verifiable confidential compute platform for deploying sensitive workloads inside secure enclaves. Built by Distrust, fully open source on Codeberg (`https://codeberg.org/caution`). Dashboard at `dashboard.caution.co`, website at `caution.co`.
+
+Its core differentiator: it connects running enclave measurements back to the **intended source code and build inputs** that produced the enclave image, then lets any independent party verify it. This moves sensitive cloud services from "trust us" to "verify it yourself."
+
+Currently supports **AWS Nitro Enclaves**. Multi-hardware attestation (Intel TDX, AMD SEV-SNP, TPM 2.0) is on the 2026 roadmap, being delivered via **EnclaveOS** — requiring multiple attestation technologies to agree on workload state, distributing trust across hardware vendors.
+
+Four combined security properties: Isolation, Verifiability, Reproducibility, End-to-end encryption. Grounded in the Distrust Threat Model (`distrust.co/threatmodel.html`), which assumes systems may already be compromised at some level.
 
 Caution runs apps inside AWS Nitro Enclaves. The enclave boots a custom Linux kernel (`linux-nitro`) with a rootfs built by `caution apps build`, served via `eif_build`. Local debugging uses QEMU to boot the same rootfs with a swapped kernel.
 
@@ -27,23 +40,31 @@ Two files define a Caution app:
 
 ## CLI command surface
 
-Verified against the `caution` CLI (subcommands: `register`, `login`, `logout`, `init`, `teardown`, `verify`, `apps`, `ssh-keys`, `cache`, `credentials`, `secret`). There is **no `caution apps push`** and **no `deploy` subcommand** — don't invent them. `apps` has exactly: `create`, `list`, `get`, `destroy`, `build`, `rename`, `download-eif`.
+Verified against the `caution` CLI (subcommands: `register`, `login`, `logout`, `init`, `teardown`, `verify`, `apps`, `ssh-keys`, `cache`, `credentials`, `secret`). There is **no `deploy` subcommand** — don't invent it. `apps` has exactly: `create`, `list`, `get`, `destroy`, `build`, `rename`, `download-eif`. Deployment is triggered by `git push caution main` (a git remote named `caution`), not by any CLI subcommand.
 
-Deploy flow from a repo containing a `Procfile` + `Containerfile`:
+### Deploy flow
+
+From a repo containing a `Procfile` + `Containerfile`:
 
 ```bash
-caution login           # (or `register` first) — FIDO2/WebAuthn, interactive
-caution init            # initialize the deployment in the cwd; writes .caution/
-caution apps build      # OPTIONAL: build the EIF locally to inspect it — does NOT deploy
-caution apps create     # create + deploy the app
-caution verify --attestation-url https://<domain>/attestation   # reproduce & compare PCRs
+caution register --alpha-code <your_code>   # first time only; alpha-gated, FIDO2/WebAuthn passkey
+caution login                                # subsequent sessions — FIDO2/WebAuthn, interactive
+caution ssh-keys add --from-agent            # add an SSH key for deployment auth
+caution init                                 # initialize the deployment in the cwd; writes Procfile + .caution/deployment.json
+# (optional) caution apps build              # local inspection only — build the EIF to inspect / QEMU-debug it; does NOT deploy
+git push caution main                        # DEPLOY: push to the `caution` git remote; Caution builds & deploys
+caution verify                                # reproduce & compare PCRs
 ```
 
 Key points:
+- **Deploy is `git push caution main`** — Caution manages a git remote named `caution`. The push triggers Caution to build a reproducible enclave image (standard `docker build -f <containerfile> .` from the repo root) and deploy it into the enclave.
+- `caution init` creates the `Procfile` (if absent) and `.caution/deployment.json` (app resource ID, needed for CLI to target the right app). **Commit both to your repository.**
 - `caution apps build` is **local inspection only** (build the enclave image to look at it / QEMU-debug it). It is not a deploy step.
-- Deploy is `caution init` then `caution apps create`.
-- These commands are **interactive** (FIDO2 signing) — wrapping them in a Makefile/CI adds little and can't be fully automated. Keep ops Makefiles to local build/test/reproducibility (`go build`, `vite build`, the two-build `cmp` repro check) and run the `caution` commands directly.
+- `caution apps create` creates the app record on Caution (done during `caution init`); it is not the deploy mechanism itself.
+- These commands are **interactive** (FIDO2/WebAuthn signing) — wrapping them in a Makefile/CI adds little and can't be fully automated. Keep ops Makefiles to local build/test/reproducibility (`go build`, `vite build`, the two-build `cmp` repro check) and run the `caution` commands directly.
 - **Commit** `.caution/deployment.json` (app resource ID, needed for CLI to target the right app), `.caution/quorum-bundle.json`, and `.caution/secrets/*.asc`. **Do not commit** plaintext inputs (`.env`) or generated private keyrings (e.g. `alice.private.asc`). Build output (EIF files) should remain gitignored.
+- **Alpha access**: registration requires an access code: `caution register --alpha-code <your_code>`. Request one at `info@caution.co`. Passkey required (browser/platform/password-manager/YubiKey/NitroKey/LibremKey).
+- **Platform support**: CLI runs on Linux (x86_64) or macOS (arm64). On macOS Apple Silicon, enable Rosetta in Docker Desktop for `caution verify` (x86_64/amd64 emulation).
 
 ### Deploy is per-branch — keep `Procfile` + `Containerfile` at the repo root
 
@@ -93,15 +114,63 @@ Caution builds with `docker build -f <containerfile> .` from the repo root. It n
 
 ### Features
 
-- `e2e: true` — end-to-end encryption (default `false`).
-- `locksmith: true` — enclave secret management (default `false`). Prefer this over baking secrets into the image. **The app image must include `/etc/caution/bundle.json`** (the quorum bundle output by `caution secret new`, stored at `.caution/quorum-bundle.json`) and `/etc/caution/secrets/*.asc` — `locksmithd` reads the bundle at startup and panics with `No such file or directory` if it is absent. Add these to the Containerfile explicitly: `ADD .caution/quorum-bundle.json /etc/caution/bundle.json` and `ADD .caution/secrets/ /etc/caution/secrets/`. **Do not also set `binary:`** — it extracts only the named binary and strips `/etc/caution/`, so locksmithd still panics despite the `ADD`. Build from the full `containerfile:` image; a `scratch` image with just the static binary + bundle + encrypted secrets stays minimal and lets PCR2 measure the bundle.
+- `e2e: true` — end-to-end encryption via **STEVE** (Secure Transport Encryption via Enclave), a transparent proxy with an SDK. STEVE verifies the attested key from the confidential compute workload and encrypts data so it's only exposed in the client and inside the enclave. Runs on reserved port 49500 for `/e2p/*` traffic. TLS is complementary (transport-layer/domain trust), not a replacement — terminating TLS outside the enclave defeats the purpose. See `https://git.distrust.co/public/steve` for the STEVE source and SDK.
+- `locksmith: true` — enclave secret management (default `false`). Prefer this over baking secrets into the image. **The app image must include `/etc/caution/bundle.json`** (the quorum bundle output by `caution secret new`, stored at `.caution/quorum-bundle.json`) and `/etc/caution/secrets/*.asc` — `locksmithd` reads the bundle at startup and panics with `No such file or directory` if it is absent. Add these to the Containerfile explicitly: `ADD .caution/quorum-bundle.json /etc/caution/bundle.json` and `ADD .caution/secrets/ /etc/caution/secrets/`. **Do not also set `binary:`** — it extracts only the named binary and strips `/etc/caution/`, so locksmithd still panics despite the `ADD`. Build from the full `containerfile:` image; a `scratch` image with just the static binary + bundle + encrypted secrets stays minimal and lets PCR2 measure the bundle. Locksmithd listens on reserved port 49504 for shard submissions.
 - `debug: true` — debug mode. Zeros PCR values (breaks `caution verify`); remove before production. See Production Debugging.
 - `ssh_keys` — a full OpenSSH public key on one line for host access. Debug only; remove before production.
 - `no_cache` — disable the docker build cache.
 
-### BYOC (bring your own cloud)
+### Reserved ports (49500–49600)
+
+User apps must not declare ports in the `49500`–`49600` range in `ports`, `http_port`, or application startup commands.
+
+| Port | Service |
+|------|---------|
+| 49500 | STEVE proxy for `/e2p/*` traffic (when `e2e: true`) |
+| 49501 | Auxiliary internal proxy slot |
+| 49502 | bootproofd internal attestation service, proxied to the public `/attestation` path |
+| 49504 | Locksmith shard receiver (when `locksmith: true`) |
+
+The public attestation endpoint is the deployment's app URL plus `/attestation`; do not add `:49502` unless your operator explicitly exposes that internal port.
+
+### BYOC (bring your own compute)
 
 - `managed_on_prem: true`, `platform: aws`, `aws_region: us-east-1`.
+- Additional optional BYOC fields: `aws_instance_type`, `aws_vpc_id`, `aws_subnet_id`, `aws_security_group_id`.
+
+#### BYOC provisioning
+
+Two paths to set up BYOC:
+
+**CLI-guided (recommended):**
+```bash
+caution init --byoc    # provisions AWS infra + registers scoped deployment credentials automatically
+```
+
+**Manual provisioning:**
+```bash
+git clone https://codeberg.org/caution/bring-your-own-cloud-setup.git
+cd bring-your-own-cloud-setup
+cp .env.example .env   # edit with AWS credentials
+docker build -t caution-provisioner-setup .
+docker run --rm --env-file .env -v "$(pwd)/out:/out" caution-provisioner-setup
+# produces credentials.json.gpg in out/
+caution init --byoc --config /path/to/credentials.json.gpg
+```
+
+For an existing VPC, set `VPC_ID=vpc-xxxxxxxx` in `.env` before running the Docker command.
+
+The setup creates: a dedicated `/16` VPC with IGW/routing, S3 bucket (`caution-<deployment-id>-images`), EC2 instance role (read EIFs), builder role (publish EIFs), launch template, Auto Scaling Group (starts at 0), and a scoped IAM user with tag-based resource policies.
+
+Instance types: m5.xlarge/2xlarge/4xlarge/8xlarge (host reserves ~2 vCPUs, ~2 GB).
+
+#### BYOC teardown
+
+```bash
+caution teardown --byoc    # tears down BYOC deployment from the CLI
+```
+
+Run from your application directory (or ensure local BYOC state exists in `~/.caution/<app>/bring-your-own-cloud.json`) with AWS credentials available.
 
 ### Examples
 
@@ -236,7 +305,7 @@ Expected warnings in logs — not errors:
 
 ### Enable debug mode
 
-Add to `Procfile` before deploying (`apps create`):
+Add to `Procfile` before deploying (`git push caution main`):
 ```procfile
 debug: true
 ssh_keys: "ssh-ed25519 AAAA... you@host"
@@ -327,9 +396,30 @@ Clear the reproduction cache to force a full rebuild:
 rm -rf ~/.cache/caution/reproductions/local/<app_commit>/
 ```
 
-## Locksmith (`caution secret new`)
+## Locksmith (`caution secret`)
 
-`caution secret new keyring.asc --threshold N --max N` calls the keymaker service to mint a quorum bundle. It requires each OpenPGP certificate in the keyring to have a **signing subkey**, an **encryption subkey**, and an **authentication subkey** — all three.
+Caution's secret management uses Shamir secret sharing: a master secret is split into shards encrypted to OpenPGP keys, with a configurable quorum threshold. Shard-holders independently send shards to the enclave; once the threshold is met, the enclave reconstructs the secret and derives cryptographic keys.
+
+### Components
+
+- **Keymaker** — setup-time component that generates the quorum (master secret split into shards). Deployed from the Locksmith repo (`https://codeberg.org/caution/locksmith`). Health check: `$KEYMAKER_URL/health` returns `{"service":"keymaker","status":"ok"}`.
+- **Locksmithd** — runs inside the enclave at startup on reserved port **49504**. Reads `/etc/caution/bundle.json`, verifies signed shards via Nitro attestation, reconstructs the master secret, then starts **keyforkd** (key derivation daemon).
+- **Locksmith-oneshot** — after keyforkd starts, runs once to derive an OpenPGP key, decrypt all `.asc` files in `/etc/caution/secrets/`, and output `export KEY=value` statements. The enclave startup script sources this: `source <(/usr/bin/locksmith-oneshot)`.
+
+### Deploying Keymaker
+
+```bash
+git clone https://codeberg.org/caution/locksmith
+cd locksmith
+caution init
+git push caution main
+```
+
+After deployment, set `KEYMAKER_URL` to the deployed Locksmith application URL.
+
+### Generating a quorum (`caution secret new`)
+
+`caution secret new keyring.asc --threshold N --max M` calls the keymaker service to mint a quorum bundle. It requires each OpenPGP certificate in the keyring to have a **signing subkey**, an **encryption subkey**, and an **authentication subkey** — all three.
 
 Default `gpg --full-generate-key` on macOS (and Linux) produces only a certify primary + signing primary + encryption subkey — no auth subkey, and no dedicated signing *sub*key:
 
@@ -351,7 +441,12 @@ gpg --expert --edit-key alice@example.com
 # gpg> save
 ```
 
-For test/dev keys, use `caution secret keygen --shoot-self-in-foot` instead — it generates a compliant key (S+E+A subkeys) directly.
+For test/dev keys, use `caution secret keygen --shoot-self-in-foot` instead — it generates a compliant key (S+E+A subkeys) directly. The `--shoot-self-in-foot` flag is an explicit unsafe acknowledgement that writes unencrypted private keyrings; never use for production shard holders.
+
+```bash
+caution secret keygen alice.asc --name "Alice" --email alice@example.com --shoot-self-in-foot
+# Also writes alice.private.asc for later shard submission
+```
 
 Verify before exporting:
 ```bash
@@ -364,18 +459,44 @@ gpg --list-keys --with-colons alice@example.com | grep '^sub'
 Export to keyring:
 ```bash
 gpg --armor --export alice@example.com bob@example.com > keyring.asc
+export KEYMAKER_URL=https://your-locksmith-deployment.example
 caution secret new keyring.asc --threshold 2 --max 2   # writes .caution/quorum-bundle.json
 ```
+
+`--max` must match the number of certificates in the keyring. If `KEYMAKER_URL` is unset, the CLI exits with `KEYMAKER_URL environment variable is required`.
 
 The public key for encrypting secrets is in the `public_key` field of the bundle:
 ```bash
 jq -r '.public_key' .caution/quorum-bundle.json > recipient.asc
-printf '%s' "$MY_SECRET" | gpg --batch --yes --trust-model always \
-  --encrypt --armor --recipient-file recipient.asc \
-  --output ".caution/secrets/MY_SECRET.asc"
 ```
 
-`.caution/quorum-bundle.json` and `.caution/secrets/*.asc` are safe to commit (encrypted to the enclave-only key).
+### Encrypting secrets (`caution secret encrypt`)
+
+Encrypts values from a `.env` file to the quorum's public key, writing one armored OpenPGP message per non-empty value to `.caution/secrets/<KEY>.asc`:
+
+```bash
+caution secret encrypt                    # reads .env, writes .caution/secrets/*.asc
+caution secret encrypt DATABASE_URL API_KEY   # encrypt only selected keys
+caution secret encrypt --env-file ./prod.env --bundle ./.caution/quorum-bundle.json --secrets-dir ./.caution/secrets
+```
+
+The filename (minus `.asc`) becomes the environment variable name. `.caution/quorum-bundle.json` and `.caution/secrets/*.asc` are safe to commit (encrypted to the enclave-only key). Do not commit plaintext `.env` or private keyrings.
+
+### Sending shards (`caution secret send-shard`)
+
+!!! warning "Temporary CLI build requirement"
+    `caution secret send-shard` currently requires the **host-toolchain untrusted CLI build** (`make install-cli-untrusted`) because the StageX-reproducible default CLI hits a musl static-linking limitation with PC/SC `libpcsclite_real.so.1`. "Untrusted" means not built via StageX — it inherits host-toolchain supply-chain risks. Production shard-holders use YubiKey/smart cards.
+
+```bash
+# Development:
+caution secret send-shard --keyring alice.private.asc
+caution secret send-shard --keyring bob.private.asc    # repeat per holder
+
+# Production (smart card / YubiKey):
+caution secret send-shard    # CLI finds the connected card, prompts for PIN
+```
+
+The command looks up the enclave's public IP, reads the bundle, connects on port 49504, verifies the Nitro attestation, encrypts and sends the shard, and reports whether the quorum threshold has been met.
 
 ## Common Failures
 

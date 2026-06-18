@@ -19,7 +19,7 @@ Prefer current primary sources over memory:
   - raw (for scripting): swap `/src/branch/main/` → `/raw/branch/main/`
 - Caution docs: `https://docs.caution.co/`
 - Caution reference: `https://docs.caution.co/reference`
-- Caution containerizing guide: `https://docs.caution.co/reference/containerizing/`
+- Caution containerizing guide: `https://docs.caution.co/guides/containerize-an-application/`
 
 Do not hardcode "latest" digests or versions from memory. StageX images are updated by release. Confirm the current digest before writing a production `FROM`.
 
@@ -42,6 +42,15 @@ When helping containerize an app for Caution, produce or review both:
 - `Procfile` that tells Caution how to run it — authored with the `caution-platform` skill.
 
 Keep the final image minimal. Copy only runtime artifacts from the builder stage. The Containerfile's entrypoint/binary location must line up with the Procfile's `run:` command.
+
+### Caution build constraints
+
+Caution builds the application container with `docker build -f <containerfile> .` from the repository root. It does **not**:
+
+- Support a `build` Procfile field (legacy, removed).
+- Pass extra `--build-arg` values.
+
+All public build-time configuration must be part of the Containerfile itself — via `ENV`, `ARG` with defaults, or files `COPY`ed into the image. Do not bake secrets into the image; use Locksmith (see the `caution-platform` skill) for secret values.
 
 ## Digest Pinning
 
