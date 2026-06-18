@@ -13,6 +13,10 @@ Prefer current primary sources over memory:
 
 - StageX source: `https://codeberg.org/stagex/stagex`
 - StageX packages: `https://stagex.tools/packages/`
+- StageX pinned digests (authoritative, per release branch):
+  - pallets: `https://codeberg.org/stagex/stagex/src/branch/main/digests/pallet.txt`
+  - core: `https://codeberg.org/stagex/stagex/src/branch/main/digests/core.txt`
+  - raw (for scripting): swap `/src/branch/main/` → `/raw/branch/main/`
 - Caution docs: `https://docs.caution.co/`
 - Caution reference: `https://docs.caution.co/reference`
 - Caution containerizing guide: `https://docs.caution.co/reference/containerizing/`
@@ -41,17 +45,38 @@ Keep the final image minimal. Copy only runtime artifacts from the builder stage
 
 ## Digest Pinning
 
-Always pin StageX images by digest in production examples:
+Always pin StageX images by digest in production examples.
+
+**Primary source: the StageX repo digest files.** They list the current
+`<sha256-hex> <image-name>` for every image on a release branch, need no Docker
+or registry pull, and are what StageX itself publishes. Pallets are in
+`digests/pallet.txt`, core images in `digests/core.txt`. Look one up:
+
+```bash
+# pallet-rust digest from the main branch
+curl -s "https://codeberg.org/stagex/stagex/raw/branch/main/digests/pallet.txt" \
+  | awk '$2 == "pallet-rust" { print $1 }'
+# core-filesystem (a COPY --from=stagex/core-... dependency)
+curl -s "https://codeberg.org/stagex/stagex/raw/branch/main/digests/core.txt" \
+  | awk '$2 == "core-filesystem" { print $1 }'
+```
+
+Each line is `<digest> <name>` (note: digest first, name second). Use the hex as
+the `sha256:` value:
+
+```dockerfile
+FROM stagex/pallet-rust@sha256:<digest-from-pallet.txt> AS build
+```
+
+When verifying an existing Containerfile, grep its pinned digests against these
+files — a digest absent from the current branch is stale or hand-typed.
+
+**Alternative: pull + inspect** (when you need the digest of a locally available
+image, or to cross-check):
 
 ```bash
 docker pull stagex/pallet-rust --platform linux/amd64
 docker inspect stagex/pallet-rust --format '{{index .RepoDigests 0}}'
-```
-
-Then use:
-
-```dockerfile
-FROM stagex/pallet-rust@sha256:<verified-digest> AS build
 ```
 
 Repeat for every `FROM` and every `COPY --from=stagex/...` dependency that must be part of the reproducible input set. For examples, placeholders are acceptable only when the surrounding text explicitly says to replace them with verified digests.
