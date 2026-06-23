@@ -60,6 +60,9 @@ caution verify                                # reproduce & compare PCRs
 Key points:
 - **Deploy is `git push caution main`** — Caution manages a git remote named `caution`. The push triggers Caution to build a reproducible enclave image (standard `docker build -f <containerfile> .` from the repo root) and deploy it into the enclave.
 - `caution init` creates the `caution.hcl` (if absent) and `.caution/deployment.json` (app resource ID, needed for CLI to target the right app). **Commit both to your repository.** To convert an existing legacy `Procfile`, run `caution apps migrate-procfile` (`--procfile <path>` to specify a non-default input, `--output <path>` to write elsewhere, `--force` to overwrite an existing `caution.hcl`).
+  - **`migrate-procfile` output needs manual review** (verified against `caution-config::from_procfile` + the deploy path in `api/src/main.rs:2059`):
+    1. **Env-prefix in `run:` is broken by the split.** `migrate-procfile` shlex-splits `run:` and takes the first token as `command`, so `run: FOO=1 /usr/bin/app` becomes `command = "FOO=1"`, `args = ["/usr/bin/app"]`. Because of the deploy-path limitation below (`args` is dropped), the result runs `sh -c 'FOO=1'` and the binary never starts. Fix by hand: put the **entire** run string — env prefixes included — into a single `command` (`command = "FOO=1 /usr/bin/app"`); it is executed via `sh -c`.
+    2. **`locksmith: true` is dropped without warning.** This is expected — HCL has no `locksmith` field (it's implied by `env::vault`), and the Procfile doesn't say which secrets to vault, so the migrator can't synthesize the `env::vault(...)` entries. But it emits no warning. Re-add Locksmith by hand: reference each secret with `env::vault("NAME")` in the unit `env` map (any `env::vault` enables Locksmith — see Secrets below).
 - `caution apps build` is **local inspection only** (build the enclave image to look at it / QEMU-debug it). It is not a deploy step.
 - `caution apps create` creates the app record on Caution (done during `caution init`); it is not the deploy mechanism itself.
 - These commands are **interactive** (FIDO2/WebAuthn signing) — wrapping them in a Makefile/CI adds little and can't be fully automated. Keep ops Makefiles to local build/test/reproducibility (`go build`, `vite build`, the two-build `cmp` repro check) and run the `caution` commands directly.
@@ -106,9 +109,9 @@ unit "default" {
 }
 ```
 
-- `command` — **required**, absolute path to the binary.
-- `args` — list of arguments.
-- `env` — map of env vars. Values must be string literals or function calls; anything else errors with `Invalid env expression for key '<K>'; only string literals and function calls are allowed`. Use `env::vault(...)` for secrets (see Features).
+- `command` — **required**. Executed by the enclave via `sh -c '<command>'`, so it can be a full shell string (`"FOO=1 /app/server --port 8080"`), not just a bare binary path.
+- `args` — list of arguments. **⚠️ Currently ignored by the deploy path** (`api/src/main.rs:2059` builds `run_command` from `unit.command` only; `BuildRequest` has no `args`/`env` fields). Fold any arguments into `command` until this is wired up.
+- `env` — map of env vars. Values must be string literals or function calls; anything else errors with `Invalid env expression for key '<K>'; only string literals and function calls are allowed`. **⚠️ Plain `env` literals are currently NOT injected** — the map is only scanned by `has_vault_env()` to enable Locksmith. The only env that reaches the app is what `locksmith-oneshot` exports from `/etc/caution/secrets/*.asc`. So: use `env::vault("NAME")` for secrets (works, via Locksmith), but set non-secret env vars as an inline prefix in `command` (e.g. `command = "LOG_LEVEL=info /app/server"`).
 
 ### `build` — choosing the container input
 
