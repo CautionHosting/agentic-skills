@@ -1,4 +1,4 @@
 interface:
   display_name: "Caution Platform"
   short_description: "Build, deploy, and debug Caution enclave apps"
-  default_prompt: "Use $caution-platform to write or debug a Caution Procfile and deployment flow."
+  default_prompt: "Use $caution-platform to write or debug a Caution caution.hcl and deployment flow."

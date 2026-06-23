@@ -28,7 +28,7 @@ Write the Caution `caution.hcl`, and deploy/debug enclave apps locally and on AW
 ```bash
 for skill in stagex-reproducible-builds caution-platform; do
   mkdir -p ~/.claude/skills/$skill
-  curl -sL https://raw.githubusercontent.com/vkobel/enclave-dev-skills/main/$skill/SKILL.md \
+  curl -sL https://codeberg.org/caution/agentic-skills/raw/branch/main/$skill/SKILL.md \
     -o ~/.claude/skills/$skill/SKILL.md
 done
 ```
@@ -38,8 +38,8 @@ done
 Clone this repo, then copy the skill folders into `~/.codex/skills` so Codex can discover both `SKILL.md` and `agents/openai.yaml`:
 
 ```bash
-git clone https://github.com/vkobel/enclave-dev-skills.git
-cd enclave-dev-skills
+git clone https://codeberg.org/caution/agentic-skills.git
+cd agentic-skills
 
 for skill in stagex-reproducible-builds caution-platform; do
   mkdir -p ~/.codex/skills/$skill
