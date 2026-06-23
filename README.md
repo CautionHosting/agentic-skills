@@ -11,13 +11,13 @@ Reproducible, verifiable container images with [StageX](https://stagex.tools).
 - Rust, Go, C/C++ build patterns with full vendoring
 - Pallet selection and digest pinning
 - `SOURCE_DATE_EPOCH`, `RUN --network=none`, hermetic builds
-- The `Containerfile`; PCR reproducibility verification checklist (Procfile authoring lives in `caution-platform`)
+- The `Containerfile`; PCR reproducibility verification checklist (`caution.hcl` authoring lives in `caution-platform`)
 
 ### [`caution-platform`](./caution-platform/SKILL.md)
 
-Write the Caution `Procfile`, and deploy/debug enclave apps locally and on AWS Nitro.
+Write the Caution `caution.hcl`, and deploy/debug enclave apps locally and on AWS Nitro.
 
-- `Procfile` authoring — `run` command, container input, ports, resources, features
+- `caution.hcl` authoring — unit command, container input, ports, resources, features
 - Local QEMU debugging on a Linux host, or a Linux amd64 VM on macOS
 - Nitro bzImage vs standard x86_64 kernel — when and how to get each
 - Attestation endpoint testing (`/attestation` request format, expected errors)

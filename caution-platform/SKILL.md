@@ -1,6 +1,6 @@
 ---
 name: caution-platform
-description: Use when writing a Caution Procfile, or deploying, debugging, or testing Caution enclave apps — locally with QEMU (on a Linux host, or inside a Linux amd64 VM on macOS), or on AWS Nitro (health check failures, attestation errors, vsock issues, SSH debug mode, nitro-cli, service logs). Covers the full CLI surface, deploy flow (git push caution main), BYOC provisioning, Locksmith secret management, STEVE end-to-end encryption, and PCR verification.
+description: Use when writing a Caution app config (caution.hcl, or the legacy Procfile), or deploying, debugging, or testing Caution enclave apps — locally with QEMU (on a Linux host, or inside a Linux amd64 VM on macOS), or on AWS Nitro (health check failures, attestation errors, vsock issues, SSH debug mode, nitro-cli, service logs). Covers the full CLI surface, deploy flow (git push caution main), BYOC provisioning, Locksmith secret management, STEVE end-to-end encryption, and PCR verification.
 ---
 
 # Caution Platform
@@ -11,7 +11,8 @@ Prefer current primary sources over memory:
 
 - Caution docs: `https://docs.caution.co/`
 - Caution reference: `https://docs.caution.co/reference`
-- Caution Procfile reference: `https://docs.caution.co/reference/procfile/`
+- Caution caution.hcl reference: `https://docs.caution.co/reference/caution-hcl/`
+- Caution Procfile reference (legacy): `https://docs.caution.co/reference/procfile/`
 - Caution containerizing guide: `https://docs.caution.co/guides/containerize-an-application/`
 - Caution debugging guide: `https://docs.caution.co/reference/debugging/`
 - Caution key services guide: `https://docs.caution.co/concepts/key-services/`
@@ -36,21 +37,21 @@ Caution runs apps inside AWS Nitro Enclaves. The enclave boots a custom Linux ke
 Two files define a Caution app:
 
 - **`Containerfile`** — the reproducible build recipe. Authored with the `stagex-reproducible-builds` skill.
-- **`Procfile`** — tells Caution how to run the resulting image. Covered below.
+- **`caution.hcl`** — tells Caution how to run the resulting image. Covered below. (A legacy key-value **`Procfile`** is still accepted as a fallback; `caution.hcl` wins when both are present. Convert with `caution apps migrate-procfile [--procfile <path>] [--output <path>] [--force]`.)
 
 ## CLI command surface
 
-Verified against the `caution` CLI (subcommands: `register`, `login`, `logout`, `init`, `teardown`, `verify`, `apps`, `ssh-keys`, `cache`, `credentials`, `secret`). There is **no `deploy` subcommand** — don't invent it. `apps` has exactly: `create`, `list`, `get`, `destroy`, `build`, `rename`, `download-eif`. Deployment is triggered by `git push caution main` (a git remote named `caution`), not by any CLI subcommand.
+Verified against the `caution` CLI (subcommands: `register`, `login`, `logout`, `init`, `teardown`, `verify`, `apps`, `ssh-keys`, `cache`, `credentials`, `secret`). There is **no `deploy` subcommand** — don't invent it. `apps` has exactly: `create`, `list`, `get`, `destroy`, `build`, `rename`, `download-eif`, `migrate-procfile`. Deployment is triggered by `git push caution main` (a git remote named `caution`), not by any CLI subcommand.
 
 ### Deploy flow
 
-From a repo containing a `Procfile` + `Containerfile`:
+From a repo containing a `caution.hcl` + `Containerfile`:
 
 ```bash
 caution register --alpha-code <your_code>   # first time only; alpha-gated, FIDO2/WebAuthn passkey
 caution login                                # subsequent sessions — FIDO2/WebAuthn, interactive
 caution ssh-keys add --from-agent            # add an SSH key for deployment auth
-caution init                                 # initialize the deployment in the cwd; writes Procfile + .caution/deployment.json
+caution init                                 # initialize the deployment in the cwd; writes caution.hcl + .caution/deployment.json
 # (optional) caution apps build              # local inspection only — build the EIF to inspect / QEMU-debug it; does NOT deploy
 git push caution main                        # DEPLOY: push to the `caution` git remote; Caution builds & deploys
 caution verify                                # reproduce & compare PCRs
@@ -58,7 +59,7 @@ caution verify                                # reproduce & compare PCRs
 
 Key points:
 - **Deploy is `git push caution main`** — Caution manages a git remote named `caution`. The push triggers Caution to build a reproducible enclave image (standard `docker build -f <containerfile> .` from the repo root) and deploy it into the enclave.
-- `caution init` creates the `Procfile` (if absent) and `.caution/deployment.json` (app resource ID, needed for CLI to target the right app). **Commit both to your repository.**
+- `caution init` creates the `caution.hcl` (if absent) and `.caution/deployment.json` (app resource ID, needed for CLI to target the right app). **Commit both to your repository.** To convert an existing legacy `Procfile`, run `caution apps migrate-procfile` (`--procfile <path>` to specify a non-default input, `--output <path>` to write elsewhere, `--force` to overwrite an existing `caution.hcl`).
 - `caution apps build` is **local inspection only** (build the enclave image to look at it / QEMU-debug it). It is not a deploy step.
 - `caution apps create` creates the app record on Caution (done during `caution init`); it is not the deploy mechanism itself.
 - These commands are **interactive** (FIDO2/WebAuthn signing) — wrapping them in a Makefile/CI adds little and can't be fully automated. Keep ops Makefiles to local build/test/reproducibility (`go build`, `vite build`, the two-build `cmp` repro check) and run the `caution` commands directly.
@@ -66,77 +67,172 @@ Key points:
 - **Alpha access**: registration requires an access code: `caution register --alpha-code <your_code>`. Request one at `info@caution.co`. Passkey required (browser/platform/password-manager/YubiKey/NitroKey/LibremKey).
 - **Platform support**: CLI runs on Linux (x86_64) or macOS (arm64). On macOS Apple Silicon, enable Rosetta in Docker Desktop for `caution verify` (x86_64/amd64 emulation).
 
-### Deploy is per-branch — keep `Procfile` + `Containerfile` at the repo root
+### Deploy is per-branch — keep `caution.hcl` + `Containerfile` at the repo root
 
-Caution deploys a **specific git branch** (it reports e.g. `Deploying branch 'main' at <sha>`) and looks for a **root `Procfile`** on *that* branch. Two consequences that bite in practice:
+Caution deploys a **specific git branch** (it reports e.g. `Deploying branch 'main' at <sha>`) and looks for a **root `caution.hcl`** (or legacy `Procfile`) on *that* branch. Two consequences that bite in practice:
 
-- **Put both files at the repo root**, not in a subdir. The `Procfile` *must* be at the root. The `Containerfile` is best at the root too: omit the `containerfile:` key and let Caution auto-detect a root `Containerfile` (before `Dockerfile`). A subpath like `containerfile: deploy/Containerfile` is supported but more fragile — root + auto-detect is the reliable convention. The Docker build context is the repo root regardless, so a root `Containerfile` can still `COPY deploy/ ...`.
-- **Deploy the branch that actually carries these files.** Pushing a branch without them (e.g. a bare `main` while the work lives on a feature branch) fails with `error: No Procfile found in repository root`. Either merge the feature branch to the deployed branch first, or push the feature branch to the deploy ref (`git push caution <feature>:main`).
+- **Put both files at the repo root**, not in a subdir. The `caution.hcl` *must* be at the root. The `Containerfile` is best at the root too: omit the `containerfile` field and let Caution auto-detect a root `Containerfile` (before `Dockerfile`). A subpath like `containerfile = "deploy/Containerfile"` is supported but more fragile — root + auto-detect is the reliable convention. The Docker build context is the repo root regardless, so a root `Containerfile` can still `COPY deploy/ ...`.
+- **Deploy the branch that actually carries these files.** Pushing a branch without them (e.g. a bare `main` while the work lives on a feature branch) fails with `No configuration file found in repository root. Add a 'caution.hcl' file or a 'Procfile' with a required 'run:' field.`. Either merge the feature branch to the deployed branch first, or push the feature branch to the deploy ref (`git push caution <feature>:main`).
 
-## Procfile
+## caution.hcl
 
-The `Procfile` is a key-value file (one `key: value` per line) at the repo root. It tells Caution how to run the app, which build recipe to use, and what metadata to publish. The Containerfile builds the image; the Procfile launches it.
+`caution.hcl` is an [HCL](https://github.com/hashicorp/hcl) file at the repo root. It tells Caution how to run the app, which build recipe to use, and what to publish for verification. The Containerfile builds the image; `caution.hcl` launches it.
 
-### Required field
+It has an optional top-level `caution { }` block (account/provider settings) and **exactly one** `enclave "<name>" { }` block (multiple enclaves → `Multiple enclaves defined; only one enclave is supported`). The enclave holds `build`, `resources`, `network`, `debug`, and one or more `unit` blocks:
 
-- `run` — the command Caution executes to start the app inside the enclave. The full container filesystem is in the EIF, so use an absolute path that matches the image. It must line up with the binary location the Containerfile produces (e.g. an `ENTRYPOINT ["/app/server"]` pairs with `run: /app/server`).
+```hcl
+caution {
+  # account / provider settings (optional)
+}
 
-```procfile
-run: /app/server
+enclave "main" {
+  build     { }        # what to build
+  resources { }        # cpu / memory
+  network   { }        # ingress, egress, http
+  debug     { }        # debug + ssh access
+  unit "default" { }   # the command to run (required)
+}
 ```
 
-### Choosing the container input (pick one)
+### Required: the `default` unit
+
+The `unit "default"` block is **required** — Caution runs the command from the unit literally named `default` (the API does `units.get("default")`; a unit with any other name is ignored for startup, so `unit "main"` will NOT start). Use an absolute path matching the image (an `ENTRYPOINT ["/app/server"]` pairs with `command = "/app/server"`).
+
+```hcl
+unit "default" {
+  command = "/app/server"
+  args    = ["--port", "8080"]
+  env     = { LOG_LEVEL = "info" }
+}
+```
+
+- `command` — **required**, absolute path to the binary.
+- `args` — list of arguments.
+- `env` — map of env vars. Values must be string literals or function calls; anything else errors with `Invalid env expression for key '<K>'; only string literals and function calls are allowed`. Use `env::vault(...)` for secrets (see Features).
+
+### `build` — choosing the container input
+
+```hcl
+build {
+  containerfile = "deploy/Containerfile"
+  app_sources   = ["https://codeberg.org/example/api"]
+  cache         = true
+}
+```
 
 | Field | Use when |
 |---|---|
-| `containerfile` | You build from a Containerfile/Dockerfile (most common). Path relative to repo root, e.g. `deploy/Containerfile`. Defaults to `Containerfile`/`Dockerfile` at the root if omitted. |
-| `oci_tarball` | You ship a prebuilt reproducible OCI tarball instead of building. Path to the tarball. |
-| `binary` | Only for a fully self-contained static binary with no config files, shared libraries, or other filesystem deps. Unsuitable for most apps. **Incompatible with `locksmith: true`** — `binary:` extracts only the named file and discards the rest of the image, so the `/etc/caution/bundle.json` you `ADD`ed never reaches the EIF rootfs and `locksmithd` panics. Use `containerfile:` when using locksmith. |
+| `containerfile` | You build from a Containerfile/Dockerfile (most common). Path relative to repo root. Defaults to `Containerfile`/`Dockerfile` at the root if omitted. |
+| `binary` | Only for a fully self-contained static binary with no config files, shared libraries, or other filesystem deps. Unsuitable for most apps. **Incompatible with secrets** — `binary` extracts only the named file and discards the rest of the image, so the `/etc/caution/bundle.json` you `ADD`ed never reaches the EIF rootfs and `locksmithd` panics. Omit `binary` (use `containerfile`) when using Locksmith. |
+| `app_sources` | List of git URLs for application source verification, embedded in the attestation manifest. |
+| `cache` | Defaults `true`; set `false` to disable the docker build cache. |
 
-Caution builds with `docker build -f <containerfile> .` from the repo root. It no longer supports a `build:` key in the Procfile and passes no extra docker build args — put all build logic in the Containerfile.
+Caution builds with `docker build -f <containerfile> .` from the repo root. There is no custom build command and no extra docker build args — put all build logic in the Containerfile. (HCL has no `oci_tarball`, `enclave_sources`, or `metadata` field; those were legacy Procfile keys.)
 
-### Networking
+### `network` — ports, traffic, and TLS
 
-- `ports` — comma-separated string of ports to expose, e.g. `ports: 8232, 8233`. **Not a YAML array** — `ports: [8080]` is wrong; use `ports: 8080`. Must match the ports the app listens on (and the `hostfwd` rules used for local QEMU). Do **not** use the reserved `49500`–`49600` range.
-- `http_port` — a single port Caution fronts with Caddy for TLS termination. Pair with `domain`. **The `http_port` value must also appear in `ports`** — Caution's Procfile validation (at `apps create`) rejects it otherwise (`Invalid Procfile: http_port X must also be listed in ports`).
-- `domain` — domain name for the deployment.
+`network` holds repeatable `ingress`/`egress` rules and an optional `http` block. Each port the app exposes needs an `ingress` rule. Do **not** use the reserved `49500`–`49600` range (`Ports 49500-49600 are reserved; choose a different application port.`).
 
-### Resources
+```hcl
+network {
+  ingress {
+    cidr_ipv4   = "0.0.0.0/0"
+    port        = 8080
+    ip_protocol = "tcp"
+  }
+  ingress {
+    cidr_ipv4  = "0.0.0.0/0"
+    start_port = 40000
+    end_port   = 40005
+  }
+  egress { cidr_ipv4 = "0.0.0.0/0" }
 
-- `memory` — MB, default `512`.
-- `cpus` — vCPUs, default `2`.
+  http {
+    domain = "api.example.com"
+    port   = 8080
+  }
+}
+```
 
-### Verification metadata
+- `ingress`/`egress` — `cidr_ipv4` (required), then either a single `port` or a `start_port`/`end_port` range, plus optional `ip_protocol`.
+- `http` — fronts one `port` with Caddy for TLS on 443; pair with `domain`. **The `http` port must be covered by an `ingress` rule**, else `http_port X must also be present in ingress rules`. Any non-`http` ingress port is exposed as raw TCP (P2P, binary protocols).
 
-- `app_sources` — comma-separated git URLs for application source verification.
-- `enclave_sources` — comma-separated git URLs for enclave source verification.
-- `metadata` — custom string published in the manifest.
+### `resources`
+
+```hcl
+resources {
+  cpu       = 2     # vCPUs, default 2
+  memory_mb = 512   # MB, default 512
+}
+```
 
 ### Features
 
-- `e2e: true` — end-to-end encryption via **STEVE** (Secure Transport Encryption via Enclave), a transparent proxy with an SDK. STEVE verifies the attested key from the confidential compute workload and encrypts data so it's only exposed in the client and inside the enclave. Runs on reserved port 49500 for `/e2p/*` traffic. TLS is complementary (transport-layer/domain trust), not a replacement — terminating TLS outside the enclave defeats the purpose. See `https://git.distrust.co/public/steve` for the STEVE source and SDK.
-- `locksmith: true` — enclave secret management (default `false`). Prefer this over baking secrets into the image. **The app image must include `/etc/caution/bundle.json`** (the quorum bundle output by `caution secret new`, stored at `.caution/quorum-bundle.json`) and `/etc/caution/secrets/*.asc` — `locksmithd` reads the bundle at startup and panics with `No such file or directory` if it is absent. Add these to the Containerfile explicitly: `ADD .caution/quorum-bundle.json /etc/caution/bundle.json` and `ADD .caution/secrets/ /etc/caution/secrets/`. **Do not also set `binary:`** — it extracts only the named binary and strips `/etc/caution/`, so locksmithd still panics despite the `ADD`. Build from the full `containerfile:` image; a `scratch` image with just the static binary + bundle + encrypted secrets stays minimal and lets PCR2 measure the bundle. Locksmithd listens on reserved port 49504 for shard submissions.
-- `debug: true` — debug mode. Zeros PCR values (breaks `caution verify`); remove before production. See Production Debugging.
-- `ssh_keys` — a full OpenSSH public key on one line for host access. Debug only; remove before production.
-- `no_cache` — disable the docker build cache.
+- **End-to-end encryption** — add an `e2e_encryption` block inside `http`. Encryption via **STEVE** (Secure Transport Encryption via Enclave), a transparent proxy with an SDK that verifies the attested key and encrypts so data is only exposed in the client and inside the enclave. Runs on reserved port 49500 for `/e2p/*` traffic. TLS is complementary (transport/domain trust), not a replacement — terminating TLS outside the enclave defeats the purpose. See `https://git.distrust.co/public/steve`.
+
+  ```hcl
+  http {
+    domain = "secure.example.com"
+    port   = 8080
+    e2e_encryption {
+      enabled      = true
+      cors_origins = ["*"]
+    }
+  }
+  ```
+
+- **Secrets (Locksmith)** — reference a managed secret with `env::vault("NAME")` in a unit's `env` map. **Using `env::vault` anywhere automatically enables Locksmith — there is no separate flag.** Prefer this over baking secrets into the image. **The app image must include `/etc/caution/bundle.json`** (the quorum bundle from `caution secret new`, stored at `.caution/quorum-bundle.json`) and `/etc/caution/secrets/*.asc` — `locksmithd` reads the bundle at startup and panics with `No such file or directory` if absent. `ADD` them explicitly: `ADD .caution/quorum-bundle.json /etc/caution/bundle.json` and `ADD .caution/secrets/ /etc/caution/secrets/`. **Do not set `binary`** — it strips `/etc/caution/`, so locksmithd still panics. Build from the full `containerfile` image; a `scratch` image with the static binary + bundle + encrypted secrets stays minimal and lets PCR2 measure the bundle. Locksmithd listens on reserved port 49504 for shard submissions.
+
+  ```hcl
+  unit "default" {
+    command = "/app/server"
+    env = {
+      DATABASE_URL = env::vault("DATABASE_URL")
+    }
+  }
+  ```
+
+- **Debug** — a `debug { enabled = true }` block enables debug mode (zeros PCR values, breaks `caution verify`; remove before production). `ssh_keys` is a list of full OpenSSH public keys for host access (opens port 22; debug only). See Production Debugging.
+
+  ```hcl
+  debug {
+    enabled  = true
+    ssh_keys = ["ssh-ed25519 AAAA... you@host"]
+  }
+  ```
 
 ### Reserved ports (49500–49600)
 
-User apps must not declare ports in the `49500`–`49600` range in `ports`, `http_port`, or application startup commands.
+User apps must not declare ports in the `49500`–`49600` range in `ingress`, `egress`, `http`, or application startup commands.
 
 | Port | Service |
 |------|---------|
-| 49500 | STEVE proxy for `/e2p/*` traffic (when `e2e: true`) |
+| 49500 | STEVE proxy for `/e2p/*` traffic (when e2e encryption is enabled) |
 | 49501 | Auxiliary internal proxy slot |
 | 49502 | bootproofd internal attestation service, proxied to the public `/attestation` path |
-| 49504 | Locksmith shard receiver (when `locksmith: true`) |
+| 49504 | Locksmith shard receiver (when secrets are used) |
 
 The public attestation endpoint is the deployment's app URL plus `/attestation`; do not add `:49502` unless your operator explicitly exposes that internal port.
 
 ### BYOC (bring your own compute)
 
-- `managed_on_prem: true`, `platform: aws`, `aws_region: us-east-1`.
-- Additional optional BYOC fields: `aws_instance_type`, `aws_vpc_id`, `aws_subnet_id`, `aws_security_group_id`.
+Set a `provider` block inside the top-level `caution { }` block:
+
+```hcl
+caution {
+  machine_type       = "m5.xlarge"   # optional host instance type
+  build_machine_type = "m5.xlarge"   # optional builder instance type
+  provider {
+    type              = "aws"
+    region            = "us-east-1"
+    vpc_id            = "vpc-..."        # optional
+    subnet_ids        = ["subnet-..."]   # optional
+    security_group_id = "sg-..."         # optional
+  }
+}
+```
+
+`provider.type` is currently `aws`. Top-level `managed_credentials` points to a managed credentials file.
 
 #### BYOC provisioning
 
@@ -175,31 +271,77 @@ Run from your application directory (or ensure local BYOC state exists in `~/.ca
 ### Examples
 
 Web app fronted with TLS:
-```procfile
-run: /app/server
-containerfile: deploy/Containerfile
-domain: api.example.com
-http_port: 3000
-ports: 3000
-app_sources: https://codeberg.org/example/api
+```hcl
+enclave "main" {
+  build {
+    containerfile = "deploy/Containerfile"
+    app_sources   = ["https://codeberg.org/example/api"]
+  }
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port      = 3000
+    }
+    http {
+      domain = "api.example.com"
+      port   = 3000
+    }
+  }
+  unit "default" {
+    command = "/app/server"
+  }
+}
 ```
 
-Multi-port node passing CLI flags:
-```procfile
-run: /app/server --rpc-port 8232 --p2p-port 8233
-ports: 8232, 8233
-http_port: 8232
-domain: node.example.com
+Multi-port node passing CLI flags (8232 fronted with TLS, 8233 raw TCP):
+```hcl
+enclave "main" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port      = 8232
+    }
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port      = 8233
+    }
+    http {
+      domain = "node.example.com"
+      port   = 8232
+    }
+  }
+  unit "default" {
+    command = "/app/server"
+    args    = ["--rpc-port", "8232", "--p2p-port", "8233"]
+  }
+}
 ```
 
-Secret management with custom resources:
-```procfile
-run: /app/server --port 3000
-locksmith: true
-ports: 3000
-http_port: 3000
-memory: 4096
-cpus: 4
+Secret management with custom resources (`env::vault` auto-enables Locksmith):
+```hcl
+enclave "main" {
+  resources {
+    cpu       = 4
+    memory_mb = 4096
+  }
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port      = 3000
+    }
+    http {
+      domain = "secrets.example.com"
+      port   = 3000
+    }
+  }
+  unit "default" {
+    command = "/app/server"
+    args    = ["--port", "3000"]
+    env = {
+      DATABASE_URL = env::vault("DATABASE_URL")
+    }
+  }
+}
 ```
 
 ## Local Debugging with QEMU
@@ -250,7 +392,7 @@ qemu-system-x86_64 \
   -append "console=ttyS0 reboot=k panic=1 nomodules nit.target=/run.sh"
 ```
 
-**With networking (standard kernel) — adjust ports to match the Procfile:**
+**With networking (standard kernel) — adjust ports to match `caution.hcl`:**
 ```bash
 qemu-system-x86_64 \
   -m 512M -nographic \
@@ -261,7 +403,7 @@ qemu-system-x86_64 \
   -device virtio-net-pci,netdev=net0
 ```
 
-The `hostfwd` ports must match the `ports` in your Procfile (plus the attestation port).
+The `hostfwd` ports must match the `ingress` ports in your `caution.hcl` (plus the attestation port).
 
 **Do NOT include `pci=off` in `-append`** — it disables PCI and breaks virtio-net.
 
@@ -305,13 +447,15 @@ Expected warnings in logs — not errors:
 
 ### Enable debug mode
 
-Add to `Procfile` before deploying (`git push caution main`):
-```procfile
-debug: true
-ssh_keys: "ssh-ed25519 AAAA... you@host"
+Add a `debug` block to the enclave before deploying (`git push caution main`):
+```hcl
+debug {
+  enabled  = true
+  ssh_keys = ["ssh-ed25519 AAAA... you@host"]
+}
 ```
 
-**Remove both before production** — debug mode zeros PCR values (breaks `caution verify`) and SSH opens port 22.
+**Remove the whole block before production** — debug mode zeros PCR values (breaks `caution verify`) and SSH opens port 22.
 
 ### SSH and read enclave logs
 
@@ -344,12 +488,12 @@ The `EnclaveManifest` embedded in the attestation records:
 - `enclave_source`, `framework_source` — with pinned commits
 - `run_command`, `enclaveos_commit`, `bootproof_commit`, `steve_commit`
 
-It does **not** store `ports` or `e2e`. During verification, `caution verify` re-reads the app source's `Procfile` at the declared commit to recover these values — they drive `run.sh` generation (STEVE inclusion, VSOCK port proxies). If the re-read is skipped or wrong, `run.sh` differs → PCR mismatch.
+It does **not** store the `network` ports or e2e setting. During verification, `caution verify` re-reads the app source's `caution.hcl` (or legacy `Procfile`) at the declared commit to recover these values — they drive `run.sh` generation (STEVE inclusion, VSOCK port proxies). If the re-read is skipped or wrong, `run.sh` differs → PCR mismatch.
 
 ### PCR mismatch — ordered diagnosis
 
 1. **Wrong dev branch / wrong CLI build.** Ensure the CLI was built from the correct branch. If using Docker-based `make install-cli`, add `NO_CACHE=--no-cache` to force a rebuild from source.
-2. **`run.sh` is wrong.** Inspect the cached `run.sh`: `cat ~/.cache/caution/reproductions/local/<app_commit>/eif-stage/run.sh`. Confirm it has the STEVE block and correct VSOCK port proxies matching the deployed app's `Procfile`. If not, the ports/e2e re-read from the Procfile isn't working.
+2. **`run.sh` is wrong.** Inspect the cached `run.sh`: `cat ~/.cache/caution/reproductions/local/<app_commit>/eif-stage/run.sh`. Confirm it has the STEVE block and correct VSOCK port proxies matching the deployed app's `caution.hcl`. If not, the ports/e2e re-read from the config isn't working.
 3. **Deployed enclave was built from a different commit** than what the manifest declares. The manifest's `app_source.commit` may be stale — the deploy may have used a different branch state, a force-push, or a rebuild without updating the manifest. Try building from nearby commits on the same branch to find the actual source that matches the deployed PCR.
 4. **Non-deterministic user app build.** If the app Containerfile runs `npm install && npm run build` without `SOURCE_DATE_EPOCH=1`, or fetches mutable content, the output differs between builds. See the `stagex-reproducible-builds` skill for remediation.
 
@@ -505,12 +649,14 @@ The command looks up the enclave's public IP, reads the bundle, connects on port
 | `Attestation endpoint did not become healthy within 120 seconds` | bootproofd can't complete NSM attestation — often `vsock-network.service` is down (no internet in enclave) | SSH in, check `vsock-network.service` and `nitro_enclaves.log` |
 | `Enclave failed to start` | Insufficient memory/CPU, or EIF failed to download from S3 | Check `nitro-enclaves-allocator.service` and `nitro-enclave.service` |
 | App unreachable | vsock proxy not running for that port | `systemctl status vsock-proxy-<port>.service` |
-| App unreachable, port not in `ports` | Port the app listens on is missing from the Procfile `ports` list | Add the port to `ports` (and `hostfwd` for local QEMU) |
-| `Invalid Procfile: http_port X must also be listed in ports` | `http_port` was set but `ports` was omitted or doesn't include that same port number | Add `ports: X` (or include X in the ports list) alongside `http_port: X` |
-| `caution verify` fails after debug deploy | PCRs are zeroed in debug mode | Remove `debug: true`, redeploy |
+| App unreachable, port has no ingress rule | Port the app listens on has no `ingress` rule in `network` | Add an `ingress` rule for that port (and `hostfwd` for local QEMU) |
+| `http_port X must also be present in ingress rules` | An `http { port = X }` was set but no `ingress` rule covers X | Add an `ingress { port = X }` rule alongside the `http` block |
+| `Multiple enclaves defined; only one enclave is supported` | More than one `enclave "..." { }` block in `caution.hcl` | Define exactly one `enclave` block |
+| `Invalid env expression for key '...'` | A unit `env` value is not a string literal or function call | Use a quoted string or `env::vault("NAME")` |
+| `caution verify` fails after debug deploy | PCRs are zeroed in debug mode | Remove the `debug` block, redeploy |
 | Port forwarding not working in QEMU | `pci=off` in kernel cmdline, or Nitro kernel (no virtio-net driver) | Use standard kernel, remove `pci=off` |
 | App image build fails with `wget: error getting response: Connection reset by peer` | busybox `wget` has no TLS — can't fetch `https://` URLs inside a stagex pallet | Vendor the tarball locally: `curl -sL <url> -o file.tar.gz`, commit it, use `COPY file.tar.gz .` instead of `wget` in the Containerfile |
-| `locksmithd` panics: `has bundle: No such file or directory` | Two causes: (a) the app image is missing `/etc/caution/bundle.json` — `locksmith: true` does not inject it; or (b) the bundle IS `ADD`ed but the Procfile sets `binary:`, which extracts only that one file and drops `/etc/caution/`. | (a) `ADD .caution/quorum-bundle.json /etc/caution/bundle.json` and `ADD .caution/secrets/ /etc/caution/secrets/` in the Containerfile. (b) Remove `binary:` and deploy via `containerfile:` so the full image filesystem becomes the EIF rootfs. |
+| `locksmithd` panics: `has bundle: No such file or directory` | Two causes: (a) the app image is missing `/etc/caution/bundle.json` — using `env::vault` does not inject it; or (b) the bundle IS `ADD`ed but `build` sets `binary`, which extracts only that one file and drops `/etc/caution/`. | (a) `ADD .caution/quorum-bundle.json /etc/caution/bundle.json` and `ADD .caution/secrets/ /etc/caution/secrets/` in the Containerfile. (b) Remove `binary` and deploy via `containerfile` so the full image filesystem becomes the EIF rootfs. |
 | `keyring contains no Keymaker-eligible public certificates` during `caution secret new` | Key(s) missing a signing, encryption, or authentication subkey (all three required) | For dev keys: `caution secret keygen --shoot-self-in-foot`. For GPG keys: add a signing subkey and an auth subkey via `gpg --expert --edit-key`. See Locksmith section above. |
 | `no match for platform in manifest: not found` during `caution apps build` | StageX images are linux/amd64 only; on an arm64 host (e.g. Apple Silicon) the builder defaults to arm64 | Build inside an amd64 environment, or add `--platform=linux/amd64` to every `FROM` line in the Containerfile: `FROM --platform=linux/amd64 stagex/...` |
 | buildx lint warning `FromPlatformFlagConstDisallowed: FROM --platform flag should not use constant value "linux/amd64"` | You pinned `--platform=linux/amd64` on `FROM` (the fix above) | **Benign — don't "fix" it.** The constant pin is deliberate for amd64-only StageX images; it prevents the arm64 default footgun. The build proceeds and stays reproducible. |

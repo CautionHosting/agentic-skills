@@ -1,6 +1,6 @@
 ---
 name: stagex-reproducible-builds
-description: Use when creating or reviewing StageX-based Containerfiles, Dockerfiles, or build workflows for reproducible builds, Caution deployments, confidential compute enclaves, verifiable compute, Nitro/TEE attestation, or enclave image PCR verification. Covers choosing StageX pallets, digest pinning, offline dependency vendoring, deterministic Rust/Go/C/C++ builds, minimal runtime images, and Caution-compatible reproducibility checks. For authoring the Caution Procfile, use the caution-platform skill.
+description: Use when creating or reviewing StageX-based Containerfiles, Dockerfiles, or build workflows for reproducible builds, Caution deployments, confidential compute enclaves, verifiable compute, Nitro/TEE attestation, or enclave image PCR verification. Covers choosing StageX pallets, digest pinning, offline dependency vendoring, deterministic Rust/Go/C/C++ builds, minimal runtime images, and Caution-compatible reproducibility checks. For authoring the Caution app config (caution.hcl), use the caution-platform skill.
 ---
 
 # StageX Reproducible Builds
@@ -39,15 +39,15 @@ For Caution, reproducibility is required for verifiability:
 When helping containerize an app for Caution, produce or review both:
 
 - `Containerfile` or `Dockerfile` that builds a reproducible image — this skill's focus.
-- `Procfile` that tells Caution how to run it — authored with the `caution-platform` skill.
+- `caution.hcl` that tells Caution how to run it — authored with the `caution-platform` skill.
 
-Keep the final image minimal. Copy only runtime artifacts from the builder stage. The Containerfile's entrypoint/binary location must line up with the Procfile's `run:` command.
+Keep the final image minimal. Copy only runtime artifacts from the builder stage. The Containerfile's entrypoint/binary location must line up with the unit `command` in `caution.hcl`.
 
 ### Caution build constraints
 
 Caution builds the application container with `docker build -f <containerfile> .` from the repository root. It does **not**:
 
-- Support a `build` Procfile field (legacy, removed).
+- Run a custom build command (the legacy Procfile `build` field is gone).
 - Pass extra `--build-arg` values.
 
 All public build-time configuration must be part of the Containerfile itself — via `ENV`, `ARG` with defaults, or files `COPY`ed into the image. Do not bake secrets into the image; use Locksmith (see the `caution-platform` skill) for secret values.
@@ -388,19 +388,23 @@ COPY --from=build /myapp /app/myapp
 ENTRYPOINT ["/app/myapp"]
 ```
 
-## Procfile
+## caution.hcl
 
-Every Caution app also needs a `Procfile`. Caution starts the app with its `run:`
-command, which must match the final image's binary location — if the image uses
-`ENTRYPOINT ["/app/myapp"]`, the Procfile is:
+Every Caution app also needs a `caution.hcl`. Caution starts the app with the
+`default` unit's `command`, which must match the final image's binary location —
+if the image uses `ENTRYPOINT ["/app/myapp"]`, the config is:
 
-```procfile
-run: /app/myapp
+```hcl
+enclave "main" {
+  unit "default" {
+    command = "/app/myapp"
+  }
+}
 ```
 
-The Procfile (`run`, `ports`, `http_port`, `containerfile`, resources, features)
-is authored with the `caution-platform` skill — see its Procfile section for the
-full field reference. Note Caution uses `run:`, not Heroku-style `web:`.
+The full config (`build`, `network`, `resources`, features, secrets) is authored
+with the `caution-platform` skill — see its `caution.hcl` section for the field
+reference. A legacy key-value `Procfile` is still accepted as a fallback.
 
 ## Verification Checklist
 
@@ -414,7 +418,7 @@ Before calling a build Caution/verifiable-compute ready, check:
 - `SOURCE_DATE_EPOCH` is set.
 - Target architecture is explicit and matches the deployment.
 - Final image overrides inherited shell entrypoints.
-- `Procfile` exists for Caution with a `run:` command matching the image (see caution-platform skill).
+- `caution.hcl` exists for Caution with a unit `command` matching the image (see caution-platform skill).
 - A clean rebuild on another machine or builder produces the same application artifact hash.
 
 ## Review Red Flags
