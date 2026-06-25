@@ -71,66 +71,38 @@ On a normal (non-nested) Linux box with a healthy systemd-managed Docker, you wo
 skip it. If `make run-*`/`make postgres` ever fail with that ioctl error, the driver reverted —
 re-apply.
 
-## Bring up the stack (no systemctl)
+## Bring up the stack
 
-A fresh VM has **no systemd units installed** (`caution-*.service` aren't there) and **no `~/.config/caution/` config**, so `make up` / `make postgres` (which use `systemctl --user`) won't work. Run the containers directly.
-
-Keep a small launcher script on the Linux host (idempotent: skips the dockerd fix / postgres if
-already up) that does, in order: cgroupfs fix (if needed) → `caution-network` → postgres +
-migrations (if down) → `api` + `gateway` from the built images → curls
-`/.well-known/caution/build-inputs`. It runs **images**, not source — rebuild after code changes
-(see Building). The per-command pieces are below.
-
-### What it takes to boot (if doing it by hand)
-
-The services hard-require config at startup. Required env/files (fabricate dummies for deploy-only knobs):
-
-- **`api`** reads, in order, and dies on the first missing one: `DATABASE_URL` (env) → `prices.json` (cwd `/app`) → `config.json` (cwd `/app`) → `BUILDER_AMI_ID` (env). Other `BUILDER_*`, AWS, Paddle vars are optional (warnings only).
-- **`gateway`** additionally requires `CSRF_SECRET`.
-
-Stage them once to the location the Makefile expects:
+The platform runs as Docker **images** (`make build-api build-gateway` first), not via systemd: a
+fresh box has no `caution-*.service` units and no `~/.config/caution/` config, so `make up` /
+`make postgres` (which use `systemctl --user`) don't apply. Use the bundled scripts in
+[`scripts/`](scripts/) — provider-agnostic, idempotent, parameterized via env vars. Set
+`CAUTION_REPO=/path/to/platform` when they run detached from the repo (e.g. as an installed skill):
 
 ```bash
-mkdir -p ~/.config/caution
-grep -vE '^\s*#|^\s*$' env.example > ~/.config/caution/.env
-cat >> ~/.config/caution/.env <<EOF
-DATABASE_URL=postgres://postgres:postgres@postgres:5432/caution
-BUILDER_AMI_ID=ami-0000000000dummy
-BUILDER_SECURITY_GROUP_ID=sg-0000000000dummy
-BUILDER_SUBNET_ID=subnet-0000000000dummy
-BUILDER_INSTANCE_PROFILE=dummy-profile
-TERRAFORM_STATE_BUCKET=dummy-bucket
-CSRF_SECRET=0123456789abcdef0123456789abcdef
-EOF
-cp prices.json.example  ~/.config/caution/prices.json   # has compute_margin_percent
-cp config.json.example  ~/.config/caution/config.json   # has builder_sizes
+cd scripts && CAUTION_REPO=/path/to/platform ./up.sh
 ```
 
-Then `postgres` (persistent volume) + migrations + the two services:
+| Script | Does |
+|---|---|
+| `up.sh` | cgroup fix (if needed) → stage config → postgres + migrations (if down) → api + gateway; prints the endpoint + dashboard URL. Idempotent. |
+| `down.sh` | Remove containers, **keep** the DB volume + network (fast restart, data persists). |
+| `down-clean.sh` | Full reset — also drop the volume, network, host data dir (keeps images + config). |
+| `setup-config.sh` | Stage `~/.config/caution/{.env,prices.json,config.json}` with dev dummies. |
+| `fix-docker-cgroup.sh` | Switch dockerd to cgroupfs (the cgroup-wall fix); no-op on healthy Docker. |
+| `gen-alpha-code.sh` | Mint a registration code (see below). |
 
-```bash
-docker network create caution-network 2>/dev/null || true
-docker run -d --name postgres --network caution-network \
-  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=caution \
-  -v caution-postgres-data:/var/lib/postgresql/data -p 5432:5432 postgres:16-alpine
-# migrations — idempotent enough for dev; ignore "already exists"
-for m in src/api/migrations/*.sql; do
-  docker run --rm --network caution-network -v "$PWD/src/api/migrations:/m:ro" \
-    -e PGPASSWORD=postgres postgres:16-alpine \
-    psql -h postgres -U postgres -d caution -q -f /m/$(basename "$m") 2>/dev/null || true
-done
-mkdir -p /tmp/caution-data
-docker run -d --name api --network caution-network -p 8080:8080 \
-  --env-file ~/.config/caution/.env -e CAUTION_DATA_DIR=/var/cache/caution \
-  -v ~/.config/caution/prices.json:/app/prices.json:ro \
-  -v ~/.config/caution/config.json:/app/config.json:ro \
-  -v /tmp/caution-data:/var/cache/caution caution-api
-docker run -d --name gateway --network caution-network -p 8000:8080 -p 2222:2222 \
-  --env-file ~/.config/caution/.env -e CAUTION_DATA_DIR=/var/cache/caution \
-  -v /tmp/caution-data:/var/cache/caution caution-gateway
-```
+Override `CAUTION_CFG`, `CAUTION_NETWORK`, `CAUTION_DB_VOLUME`, `CAUTION_*_PORT`, etc. — see
+`scripts/_common.sh`.
 
-Check boot: `docker logs api | tail` should end with `API server listening on 0.0.0.0:8080`; `docker logs gateway | tail` with `Gateway listening on 0.0.0.0:8080`.
+### Why the services need config to boot
+
+`up.sh` stages this for you; know it for debugging. The **`api`** reads, in order, and dies on the
+first missing one: `DATABASE_URL` (env) → `prices.json` → `config.json` (both in cwd `/app`) →
+`BUILDER_AMI_ID` (env). The **`gateway`** additionally needs `CSRF_SECRET`. Other `BUILDER_*`/AWS/
+Paddle vars are optional (warnings only). `prices.json`/`config.json` come from the repo's
+`*.example`; the deploy-only knobs get dev-safe dummies. Sanity after boot: `docker logs api | tail`
+ends with `API server listening on 0.0.0.0:8080`, gateway with `Gateway listening on 0.0.0.0:8080`.
 
 ## Building the images
 
@@ -145,14 +117,7 @@ make build-api-dev build-gateway-dev  # faster debug builds (DEV_BUILD_ARGS)
 
 ## Register / log in (alpha codes)
 
-Registration is alpha-gated by the **`beta_codes`** table (note: table is `beta_codes`, flag is `--alpha-code`). Mint one against the running DB:
-
-```bash
-code=$(openssl rand -hex 16)
-docker exec -e PGPASSWORD=postgres postgres \
-  psql -U postgres -d caution -c "INSERT INTO beta_codes (code, created_by) VALUES ('$code','local-dev')"
-echo "$code"
-```
+Registration is alpha-gated by the **`beta_codes`** table (note: table is `beta_codes`, flag is `--alpha-code`). Mint one with `scripts/gen-alpha-code.sh` (inserts a random code against the running DB).
 
 Then register with a passkey — `RP_ID=localhost`, `RP_ORIGINS` includes `http://localhost:8000`, so Touch ID / platform passkeys work against `localhost`:
 
