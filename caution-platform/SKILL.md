@@ -489,9 +489,40 @@ cat /var/log/user-data.log                               # full boot + provision
 The `EnclaveManifest` embedded in the attestation records:
 - `app_source` — URL, commit SHA, branch
 - `enclave_source`, `framework_source` — with pinned commits
-- `run_command`, `enclaveos_commit`, `bootproof_commit`, `steve_commit`
+- `run_command`, `enclaveos_commit`, `bootproof_commit`, `steve_commit` (and `locksmith_commit` when secrets are used)
 
 It does **not** store the `network` ports or e2e setting. During verification, `caution verify` re-reads the app source's `caution.hcl` (or legacy `Procfile`) at the declared commit to recover these values — they drive `run.sh` generation (STEVE inclusion, VSOCK port proxies). If the re-read is skipped or wrong, `run.sh` differs → PCR mismatch.
+
+### The tool commits (`*_COMMIT`) are the authoritative reproduction inputs — read them from the manifest, not from your CLI
+
+The four tool commits (`enclaveos_commit`, `bootproof_commit`, `steve_commit`, `locksmith_commit`) are git refs the enclave **clones and builds at image-build time** (e.g. `Containerfile.eif` does `git clone bootproof && git checkout {{BOOTPROOF_COMMIT}}`). They directly feed PCR0/PCR1. Each is resolved with this precedence:
+
+1. the value pinned in the build's `manifest.json`
+2. the `ENCLAVEOS_COMMIT` / `BOOTPROOF_COMMIT` / `STEVE_COMMIT` / `LOCKSMITH_COMMIT` env var
+3. a `DEFAULT_*_COMMIT` constant compiled into the CLI/builder (`enclave-builder/src/build.rs`)
+
+**`caution verify` reproduces correctly because it pulls these commits from the deployed enclave's attestation manifest (path 1).** A bare `caution apps build` has no manifest, so it falls back to the **compiled-in defaults (path 3)** — which can be *stale relative to what production deployed*. The platform's `Cargo.lock` (the tool *libraries* linked into the CLI) and the `DEFAULT_*_COMMIT` constants (the tool *binaries* built into the enclave) are two independent things and **drift apart**: a dep bump can move Cargo.lock forward while the `DEFAULT_*_COMMIT` constant lags. So you cannot read "what commit is deployed" off the CLI source tree — neither file is a reliable source of truth.
+
+**The source of truth for a deployed app is its live attestation manifest** — the same data `caution verify` consumes. The `/attestation` endpoint is a **POST** (it takes a challenge nonce) and returns JSON with two relevant fields: `attestation_document` (base64 COSE_Sign1, holds the PCRs) and `manifest` (plain JSON `EnclaveManifest`, holds the tool commits). The commits are in `.manifest`, **not** inside the COSE document.
+
+To reproduce a deployed PCR with `caution apps build` (e.g. to inspect or QEMU-debug the exact deployed image), read the commits from the manifest, then pass them as env vars:
+
+```bash
+# Fetch the deployed manifest and read the tool commits (nonce is base64 of 32 bytes)
+curl -s -X POST https://<app-url>/attestation \
+  -H 'Content-Type: application/json' \
+  -d '{"nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}' \
+  | jq '.manifest | {enclaveos_commit, bootproof_commit, steve_commit, locksmith_commit}'
+
+# Reproduce locally with those exact commits (don't rely on the CLI's compiled-in defaults)
+BOOTPROOF_COMMIT=<from-manifest> \
+ENCLAVEOS_COMMIT=<from-manifest> \
+STEVE_COMMIT=<from-manifest> \
+LOCKSMITH_COMMIT=<from-manifest> \
+  caution apps build --no-cache
+```
+
+(The simplest path is still `caution verify`, which does all of this for you. Use the manual env-var route only when you specifically need `apps build` artifacts — a local EIF/rootfs to inspect or boot under QEMU — for the exact deployed image.) If a fresh `caution apps build` yields a PCR0/PCR1 that doesn't match production but `caution verify` passes, this drift is the likely cause: verify used the manifest's commits, your build used stale defaults. (`PCR2` is the app layer and is unaffected by the tool commits.)
 
 ### PCR mismatch — ordered diagnosis
 
@@ -657,6 +688,7 @@ The command looks up the enclave's public IP, reads the bundle, connects on port
 | `Multiple enclaves defined; only one enclave is supported` | More than one `enclave "..." { }` block in `caution.hcl` | Define exactly one `enclave` block |
 | `Invalid env expression for key '...'` | A unit `env` value is not a string literal or function call | Use a quoted string or `env::vault("NAME")` |
 | `caution verify` fails after debug deploy | PCRs are zeroed in debug mode | Remove the `debug` block, redeploy |
+| `caution apps build` PCR0/PCR1 ≠ production, but `caution verify` passes | The tool commits (`bootproof`/`enclaveos`/`steve`/`locksmith`) compiled into the CLI as `DEFAULT_*_COMMIT` are stale vs what production deployed; `verify` uses the deployed manifest's commits, your local build used the stale defaults | Read the commits from the deployed manifest (`curl <app-url>/attestation \| jq`) and pass them as `BOOTPROOF_COMMIT=…` etc. to `caution apps build`. See "tool commits are the authoritative reproduction inputs" above. |
 | Port forwarding not working in QEMU | `pci=off` in kernel cmdline, or Nitro kernel (no virtio-net driver) | Use standard kernel, remove `pci=off` |
 | App image build fails with `wget: error getting response: Connection reset by peer` | busybox `wget` has no TLS — can't fetch `https://` URLs inside a stagex pallet | Vendor the tarball locally: `curl -sL <url> -o file.tar.gz`, commit it, use `COPY file.tar.gz .` instead of `wget` in the Containerfile |
 | `locksmithd` panics: `has bundle: No such file or directory` | Two causes: (a) the app image is missing `/etc/caution/bundle.json` — using `env::vault` does not inject it; or (b) the bundle IS `ADD`ed but `build` sets `binary`, which extracts only that one file and drops `/etc/caution/`. | (a) `ADD .caution/quorum-bundle.json /etc/caution/bundle.json` and `ADD .caution/secrets/ /etc/caution/secrets/` in the Containerfile. (b) Remove `binary` and deploy via `containerfile` so the full image filesystem becomes the EIF rootfs. |
