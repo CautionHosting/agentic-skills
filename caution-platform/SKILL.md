@@ -505,6 +505,8 @@ The four tool commits (`enclaveos_commit`, `bootproof_commit`, `steve_commit`, `
 
 **The source of truth for a deployed app is its live attestation manifest** — the same data `caution verify` consumes. The `/attestation` endpoint is a **POST** (it takes a challenge nonce) and returns JSON with two relevant fields: `attestation_document` (base64 COSE_Sign1, holds the PCRs) and `manifest` (plain JSON `EnclaveManifest`, holds the tool commits). The commits are in `.manifest`, **not** inside the COSE document.
 
+**Trust note — the manifest is unsigned.** Only the `attestation_document` (PCRs) is signed by the Nitro NSM. The sibling `manifest` field is an **unsigned claim** about which commits/source produced the enclave; a malicious or buggy host could serve commits that don't match the running image. The manifest becomes trustworthy only via the reproduction loop: rebuild from its declared commits and confirm the result matches the **signed** PCR0/PCR1. That is exactly what `caution verify` does — so trust verify's pass/fail, not the raw manifest values. When you read `.manifest` directly (e.g. the env-var route below), treat the commits as a *hint for reproduction*, not as attested fact.
+
 To reproduce a deployed PCR with `caution apps build` (e.g. to inspect or QEMU-debug the exact deployed image), read the commits from the manifest, then pass them as env vars:
 
 ```bash
