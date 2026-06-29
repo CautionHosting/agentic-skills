@@ -24,6 +24,21 @@ else
   log "$CFG/.env exists — leaving it"
 fi
 
+# Ensure the secrets that services refuse to boot without are non-empty.
+# env.example ships INTERNAL_SERVICE_SECRET/CSRF_SECRET blank; the metering and
+# gateway services exit immediately if they're empty (the dev stack skips
+# metering, but the e2e suites need it). Idempotent — only fills blanks.
+ensure_secret() {
+  local key="$1"
+  if grep -qE "^${key}=$" "$CFG/.env"; then
+    log "setting $key in $CFG/.env"
+    local val; val="$(openssl rand -hex 24)"
+    sed -i.bak "s|^${key}=$|${key}=${val}|" "$CFG/.env" && rm -f "$CFG/.env.bak"
+  fi
+}
+ensure_secret INTERNAL_SERVICE_SECRET
+ensure_secret CSRF_SECRET
+
 [ -f "$CFG/prices.json" ] || { log "copying prices.json"; cp "$REPO/prices.json.example" "$CFG/prices.json"; }
 [ -f "$CFG/config.json" ] || { log "copying config.json"; cp "$REPO/config.json.example" "$CFG/config.json"; }
 

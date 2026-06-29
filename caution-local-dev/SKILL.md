@@ -1,6 +1,6 @@
 ---
 name: caution-local-dev
-description: Use when running, building, or debugging the Caution platform itself locally (the api/gateway/frontend services + Postgres) on a Linux amd64 host or VM, as opposed to deploying a customer enclave app — e.g. bring up the dashboard, curl an API endpoint, generate an alpha/beta code to register, rebuild a service image, or fix a Docker cgroup-driver failure in a nested Linux VM. For authoring a Caution app config or deploying an enclave, use caution-platform instead.
+description: Use when running, building, debugging, or testing the Caution platform itself locally (the api/gateway/metering/email services + Postgres) on a Linux amd64 host or VM, as opposed to deploying a customer enclave app — e.g. bring up the dashboard, curl an API endpoint, generate an alpha/beta code to register, rebuild a service image, run the unit or e2e test suites against an ephemeral test DB, or fix a Docker cgroup-driver failure in a nested Linux VM. For authoring a Caution app config or deploying an enclave, use caution-platform instead.
 ---
 
 # Caution Local Dev (running the platform itself)
@@ -91,6 +91,7 @@ cd scripts && CAUTION_REPO=/path/to/platform ./up.sh
 | `setup-config.sh` | Stage `~/.config/caution/{.env,prices.json,config.json}` with dev dummies. |
 | `fix-docker-cgroup.sh` | Switch dockerd to cgroupfs (the cgroup-wall fix); no-op on healthy Docker. |
 | `gen-alpha-code.sh` | Mint a registration code (see below). |
+| `e2e.sh` | Stage config + run a `make test-e2e-*` suite against an ephemeral test DB (see [Running tests locally](#running-tests-locally)). |
 
 Override `CAUTION_CFG`, `CAUTION_NETWORK`, `CAUTION_DB_VOLUME`, `CAUTION_*_PORT`, etc. — see
 `scripts/_common.sh`.
@@ -140,6 +141,48 @@ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8000/  # dashboard HTM
 `api` to confirm the override flows through. (See `caution-platform` for why these commits are
 the deploy-time source of truth.)
 
+## Running tests locally
+
+Two tiers, run from the repo on the Linux amd64 host (the e2e tiers need Docker; on a
+non-Linux workstation run them inside the Linux amd64 VM):
+
+- **Unit tests** — `make test-unit` (`cargo test --workspace`). No Docker, no stack; just the
+  Rust toolchain + native deps. Fast inner loop for service logic.
+- **E2E suites** — `make test-e2e-*`. Each target builds the service images, stands up an
+  **ephemeral** test Postgres (`postgres-test`, DB `caution_test`, dropped afterwards), runs all
+  migrations, runs a `tests/e2e/*.sh` script against the live services, then tears everything down.
+  Targets: `test-e2e` (happy-path/ports/env/ssh), `test-e2e-billing`, `test-e2e-billing-gates`,
+  `test-e2e-legal`, `test-e2e-byoc`, `test-e2e-platform-ports`, `test-e2e-ssh-units`.
+
+The e2e stack needs two pieces of config the dev `up.sh` doesn't — both handled by
+[`e2e.sh`](scripts/e2e.sh), the wrapper to use:
+
+```bash
+cd scripts && CAUTION_REPO=/path/to/platform ./e2e.sh                 # default: test-e2e-billing
+cd scripts && CAUTION_REPO=/path/to/platform ./e2e.sh test-e2e-byoc   # any target
+```
+
+What it sets up (know it for debugging a raw `make test-e2e-*`):
+
+1. **`INTERNAL_SERVICE_SECRET` must be non-empty** in `~/.config/caution/.env`. `env.example` ships
+   it blank and the dev stack skips metering, but the e2e suites run metering — which **exits at
+   boot** with `INTERNAL_SERVICE_SECRET must be set` if it's empty. `setup-config.sh` now fills any
+   blank secret; symptom if missing is a Step 1 "metering not responding" failure.
+2. **A repo-root `.env`** — `run-api-test` loads `--env-file .env` from the repo root *in addition*
+   to `~/.config/caution/.env`. If it's absent the api container never starts
+   (`docker: --env-file: open .env: no such file or directory`); `e2e.sh` stages it from
+   `env.example`.
+
+The e2e scripts use `set -euo pipefail`, so a single failed `curl`/`psql` aborts the whole run at
+that step (the summary shows the steps that passed before it). When a run dies mid-suite, bring the
+stack up without the auto-teardown to probe by hand:
+
+```bash
+make up-test-billing        # leaves services running; Gateway :8000, Metering :8083, postgres-test
+docker logs metering        # panics/boot errors land here
+make down-test-billing      # clean up when done
+```
+
 ## Common failures
 
 | Symptom | Cause | Fix |
@@ -151,3 +194,5 @@ the deploy-time source of truth.)
 | Endpoint `200` direct on `:8080` but `404` through `:8000` | gateway route registered under nested `/api`, or stale gateway image | Register root paths at the router root (not in the `/api` nest); rebuild `caution-gateway` |
 | Footer/UI change not visible though gateway rebuilt | `frontend/dist` not rebuilt before the image | `npm run build` then `make build-gateway` |
 | `caution-api`/`caution-gateway` missing from `docker images` | built on a different Docker engine than the one you're running against | Build and run on the same Linux host/engine |
+| e2e Step 1: `metering not responding` / metering exits `INTERNAL_SERVICE_SECRET must be set` | secret blank in `~/.config/caution/.env` | Set a non-empty `INTERNAL_SERVICE_SECRET` (re-run `setup-config.sh` / use `e2e.sh`) |
+| e2e: `docker: --env-file: open .env: no such file or directory` (`run-api-test`) | no repo-root `.env` | `cp env.example .env` in the repo (or use `e2e.sh`) |
