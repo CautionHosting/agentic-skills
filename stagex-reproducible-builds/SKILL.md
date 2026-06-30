@@ -117,6 +117,7 @@ Apply these rules before language-specific details:
 - Use `RUN --network=none` for compile steps that should be hermetic.
 - Avoid build scripts that read wall-clock time, hostnames, absolute host paths, usernames, random data, locale-specific ordering, or CPU-specific flags.
 - Use stable archive extraction and verify vendored tarballs with SHA256 before unpacking.
+- **Pin file modes for committed files you `COPY` from the build context.** Git records only the exec bit, so a committed non-exec file's checked-out mode is `0666 & ~umask` — `0644` on a umask-022 host, `0664` on umask-002. Docker `COPY` *preserves the context mode*, so an unpinned mode makes the image (and any measurement over it, e.g. a Nitro initramfs/PCR) depend on the build host's umask. Files produced *inside* the build (`install -Dm…`, `cargo build` output) are immune — the container umask is fixed; this bites only host-context `COPY`s. It's silent: it changes no file content, only one mode bit, so content-level diffs look identical. **Fix:** bring the file into a build stage and set its mode in-container, then `COPY --from=build` it — `COPY <file> /tmp/x` + `RUN chmod 0644 /tmp/x`, then `COPY --from=build /tmp/x /dest`. **Do NOT use `COPY --chmod=` on the final copy** — `--chmod` also rewrites the parent directories the copy auto-creates (e.g. `/etc`, `/etc/pq`) to that mode, so `--chmod=0644` makes them non-traversable (no `x` bit), which breaks runtime traversal and tar/cpio extraction. Copying from a build stage instead creates parents at the default `0755`.
 - Do not use `curl | sh`, unpinned `git clone`, floating tags, or package manager installs inside the build.
 - Prefer JSON-form `RUN` when an image entrypoint/shell is uncertain; otherwise inspect the pallet and choose a busybox/gnu variant.
 
@@ -436,6 +437,7 @@ Flag these as correctness issues:
 - JS bundler step without `SOURCE_DATE_EPOCH=1` (output may embed timestamps).
 - Network access during compile.
 - `COPY . .` before generating or checking lockfiles.
+- A non-exec file read from the build context and `COPY`ed into a measured image with its mode unpinned — its mode tracks the build host's umask (0644 vs 0664) and silently changes any measurement over the image across hosts. Fix by setting the mode in a build stage (`RUN chmod`) and `COPY --from=build`, NOT with `COPY --chmod=` (which also clobbers auto-created parent dir modes, dropping their `x` bit and breaking traversal/extraction).
 - OCI tarball export without `rewrite-timestamp=true` (or `SOURCE_DATE_EPOCH` not passed at the buildx invocation) — the binary may be deterministic while the tarball is not.
 - A "reproducible" claim with no two-build `cmp` (or equivalent) evidence.
 - Runtime images that inherit `stagex/core-filesystem` shell entrypoint.

@@ -61,7 +61,7 @@ Key points:
 - **Deploy is `git push caution main`** — Caution manages a git remote named `caution`. The push triggers Caution to build a reproducible enclave image (standard `docker build -f <containerfile> .` from the repo root) and deploy it into the enclave.
 - `caution init` creates the `caution.hcl` (if absent) and `.caution/deployment.json` (app resource ID, needed for CLI to target the right app). **Commit both to your repository.** To convert an existing legacy `Procfile`, run `caution apps migrate-procfile` (`--procfile <path>` to specify a non-default input, `--output <path>` to write elsewhere, `--force` to overwrite an existing `caution.hcl`).
   - **`migrate-procfile` output needs manual review** (verified against `caution-config::from_procfile` + the deploy path in `api/src/main.rs:2059`):
-    1. **Env-prefix in `run:` is broken by the split.** `migrate-procfile` shlex-splits `run:` and takes the first token as `command`, so `run: FOO=1 /usr/bin/app` becomes `command = "FOO=1"`, `args = ["/usr/bin/app"]`. Because of the deploy-path limitation below (`args` is dropped), the result runs `sh -c 'FOO=1'` and the binary never starts. Fix by hand: put the **entire** run string — env prefixes included — into a single `command` (`command = "FOO=1 /usr/bin/app"`); it is executed via `sh -c`.
+    1. **Env-prefix in `run:` is split across `command` and `args`.** `migrate-procfile` shlex-splits `run:` and takes the first token as `command`, so `run: FOO=1 /usr/bin/app` becomes `command = "FOO=1"`, `args = ["/usr/bin/app"]`. This is handled correctly by the platform: leading `NAME=value` tokens in `command` are treated as inline env assignments, so the result runs `FOO=1 /usr/bin/app` as expected. Review the output to confirm the split looks right.
     2. **`locksmith: true` is dropped without warning.** This is expected — HCL has no `locksmith` field (it's implied by `env::vault`), and the Procfile doesn't say which secrets to vault, so the migrator can't synthesize the `env::vault(...)` entries. But it emits no warning. Re-add Locksmith by hand: reference each secret with `env::vault("NAME")` in the unit `env` map (any `env::vault` enables Locksmith — see Secrets below).
 - `caution apps build` is **local inspection only** (build the enclave image to look at it / QEMU-debug it). It is not a deploy step.
 - `caution apps create` creates the app record on Caution (done during `caution init`); it is not the deploy mechanism itself.
@@ -110,7 +110,7 @@ unit "default" {
 ```
 
 - `command` — **required**. Executed by the enclave via `sh -c '<command>'`, so it can be a full shell string (`"FOO=1 /app/server --port 8080"`), not just a bare binary path.
-- `args` — list of arguments. **⚠️ Currently ignored by the deploy path** (`api/src/main.rs:2059` builds `run_command` from `unit.command` only; `BuildRequest` has no `args`/`env` fields). Fold any arguments into `command` until this is wired up.
+- `args` — list of arguments. Joined with `command` and shell-quoted into the final `sh -c` string by `caution-config`. A leading run of `NAME=value` tokens in `command` is treated as inline env assignments and emitted verbatim (value shlex-quoted), so `command = "FOO=1"` + `args = ["/app/server"]` correctly produces `FOO=1 /app/server`.
 - `env` — map of env vars. Values must be string literals or function calls; anything else errors with `Invalid env expression for key '<K>'; only string literals and function calls are allowed`. **⚠️ Plain `env` literals are currently NOT injected** — the map is only scanned by `has_vault_env()` to enable Locksmith. The only env that reaches the app is what `locksmith-oneshot` exports from `/etc/caution/secrets/*.asc`. So: use `env::vault("NAME")` for secrets (works, via Locksmith), but set non-secret env vars as an inline prefix in `command` (e.g. `command = "LOG_LEVEL=info /app/server"`).
 
 ### `build` — choosing the container input
@@ -503,6 +503,8 @@ The four tool commits (`enclaveos_commit`, `bootproof_commit`, `steve_commit`, `
 
 **`caution verify` reproduces correctly because it pulls these commits from the deployed enclave's attestation manifest (path 1).** A bare `caution apps build` has no manifest, so it falls back to the **compiled-in defaults (path 3)** — which can be *stale relative to what production deployed*. The platform's `Cargo.lock` (the tool *libraries* linked into the CLI) and the `DEFAULT_*_COMMIT` constants (the tool *binaries* built into the enclave) are two independent things and **drift apart**: a dep bump can move Cargo.lock forward while the `DEFAULT_*_COMMIT` constant lags. So you cannot read "what commit is deployed" off the CLI source tree — neither file is a reliable source of truth.
 
+**To see what a *platform* currently pins, GET its public `build-inputs` endpoint** — for the managed platform, `https://dashboard.caution.co/.well-known/caution/build-inputs` (any deployment exposes `/.well-known/caution/build-inputs`). It's an unauthenticated GET returning that platform's resolved `platform` + `enclaveos`/`bootproof`/`steve`/`locksmith` commits — i.e. the refs it will build **new** enclaves from right now (the env-var/`DEFAULT_*_COMMIT` resolution as the server sees it). Use it as the quick first debugging check: compare these against your CLI's compiled-in defaults to spot drift *before* deploying, or against an app's attestation manifest to see if it was built with the platform's current pins. It is **not** app-specific and is the platform's own claim, not attested — for a specific deployed app the live attestation manifest below is still the source of truth.
+
 **The source of truth for a deployed app is its live attestation manifest** — the same data `caution verify` consumes. The `/attestation` endpoint is a **POST** (it takes a challenge nonce) and returns JSON with two relevant fields: `attestation_document` (base64 COSE_Sign1, holds the PCRs) and `manifest` (plain JSON `EnclaveManifest`, holds the tool commits). The commits are in `.manifest`, **not** inside the COSE document.
 
 **Trust note — the manifest is unsigned.** Only the `attestation_document` (PCRs) is signed by the Nitro NSM. The sibling `manifest` field is an **unsigned claim** about which commits/source produced the enclave; a malicious or buggy host could serve commits that don't match the running image. The manifest becomes trustworthy only via the reproduction loop: rebuild from its declared commits and confirm the result matches the **signed** PCR0/PCR1. That is exactly what `caution verify` does — so trust verify's pass/fail, not the raw manifest values. When you read `.manifest` directly (e.g. the env-var route below), treat the commits as a *hint for reproduction*, not as attested fact.
@@ -532,35 +534,44 @@ LOCKSMITH_COMMIT=<from-manifest> \
 2. **`run.sh` is wrong.** Inspect the cached `run.sh`: `cat ~/.cache/caution/reproductions/local/<app_commit>/eif-stage/run.sh`. Confirm it has the STEVE block and correct VSOCK port proxies matching the deployed app's `caution.hcl`. If not, the ports/e2e re-read from the config isn't working.
 3. **Deployed enclave was built from a different commit** than what the manifest declares. The manifest's `app_source.commit` may be stale — the deploy may have used a different branch state, a force-push, or a rebuild without updating the manifest. Try building from nearby commits on the same branch to find the actual source that matches the deployed PCR.
 4. **Non-deterministic user app build.** If the app Containerfile runs `npm install && npm run build` without `SOURCE_DATE_EPOCH=1`, or fetches mutable content, the output differs between builds. See the `stagex-reproducible-builds` skill for remediation.
+5. **A `COPY`ed file's mode tracks the build host's umask.** Git records only the exec bit, so a committed non-exec file's checked-out mode is `0666 & ~umask` (0644 on a umask-022 host like macOS, 0664 on a umask-002 Linux builder). Docker `COPY` preserves that mode into the initramfs, so the deployed enclave (built on Caution's Linux builder) and a local repro can differ by a single permission bit — changing PCR0/PCR1 while every file's *content* is identical. This is the subtlest cause and survives `cache=false`, a clean rebuild, and matching commits. (Exposed by `enclave-builder` commit `0667439`, which replaced a umask-normalizing `RUN cp -r` with a mode-preserving `COPY app/ /build/initramfs/` — so the app image's modes are now measured verbatim.) **Fix in the app Containerfile by setting the mode in-container, not with `COPY --chmod`:** `COPY file /tmp/x` + `RUN chmod 0644 /tmp/x`, then `COPY --from=build /tmp/x /dest`. Avoid `COPY --chmod=0644 file /dest` — `--chmod` also rewrites the auto-created parent dirs (`/etc`, `/etc/pq`) to `0644`, dropping their `x` bit; the enclave runs (root ignores it) but `caution verify` then crashes extracting the app tar as non-root: `failed to unpack etc/hostname … Permission denied`. The EIF comparison below is what surfaces the original mode diff.
 
 ### EIF filesystem comparison (deeper diagnosis)
 
-When the ordered steps above don't identify the cause, compare the local and deployed EIF filesystems directly using `diffoscope`:
+When the ordered steps above don't identify the cause, compare the **ramdisk cpio archives** of the local repro and the deployed EIF. Two non-obvious traps make the naive approach miss things:
+
+- **The ramdisk is not "the second gzip stream," and not the biggest.** A Nitro EIF contains the kernel (bzImage, internally gzip-compressed — usually the *largest* gzip stream) plus the ramdisk (a `newc` cpio, gzip-compressed). Identify the ramdisk by the cpio magic `070701`, not by size or order. `binwalk` is often not installed; a short Python scan is more reliable.
+- **Compare the cpio *archives*, never the *extracted trees*.** `cpio -idm` recreates files applying the local umask, which **erases mode differences** (both sides normalize to 0644) — exactly the bit you're hunting. Run `diffoscope` / `cmp` / `cpio -tv` on the `.cpio` files directly.
 
 ```bash
-# 1. Build locally
-caution apps build
-# EIF is at: eif-stage/output/enclave.eif
+caution apps build               # local repro: eif-stage/output/{enclave.eif,rootfs.cpio.gz}
+caution apps download-eif        # deployed EIF (filename shown in output)
 
-# 2. Download the deployed EIF
-caution apps download-eif
-# Saves the deployed EIF locally (filename shown in output)
+# Carve the ramdisk cpio from each EIF: scan gzip streams, keep the one whose
+# decompression starts with cpio newc magic 070701 (skip the larger = kernel).
+python3 - deployed.eif deployed.cpio <<'PY'
+import sys, zlib
+d=open(sys.argv[1],'rb').read(); i=0; best=None
+while True:
+    j=d.find(b'\x1f\x8b\x08',i)
+    if j<0: break
+    try:
+        o=zlib.decompressobj(32+zlib.MAX_WBITS); out=o.decompress(d[j:])+o.flush()
+        if out[:6]==b'070701' and (best is None or len(out)>len(best)): best=out
+    except Exception: pass
+    i=j+3
+open(sys.argv[2],'wb').write(best); print(len(best),'bytes')
+PY
+gzip -dc eif-stage/output/rootfs.cpio.gz > repro.cpio   # macOS: use gzip -dc, not zcat
 
-# 3. Extract both filesystems — find the second gzip entry offset in each
-mkdir /tmp/local-extract /tmp/deployed-extract
-binwalk eif-stage/output/enclave.eif
-# Note the offset of the second gzip entry, then:
-cd /tmp/local-extract
-dd if=/path/to/enclave.eif bs=1 skip=<offset> | zcat | cpio --no-absolute-filenames -idmv
+# Best finish: diffoscope on the archives (parses newc headers, reports per-member
+# mode/owner/mtime AND content):
+diffoscope deployed.cpio repro.cpio
 
-cd /tmp/deployed-extract
-dd if=/path/to/downloaded.eif bs=1 skip=<offset> | zcat | cpio --no-absolute-filenames -idmv
-
-# 4. Compare
-diffoscope /tmp/local-extract/ /tmp/deployed-extract/
+# Manual ladder if diffoscope is unavailable — narrows to the exact field:
+cmp deployed.cpio repro.cpio                                  # same size + one diff point => metadata, not content
+diff <(cpio -tv < deployed.cpio) <(cpio -tv < repro.cpio)     # per-file mode/owner/size/mtime/name
 ```
-
-`diffoscope` produces a detailed report of every difference — file additions, removals, content diffs, permission differences.
 
 ### Cache paths for debugging
 
@@ -691,6 +702,8 @@ The command looks up the enclave's public IP, reads the bundle, connects on port
 | `Invalid env expression for key '...'` | A unit `env` value is not a string literal or function call | Use a quoted string or `env::vault("NAME")` |
 | `caution verify` fails after debug deploy | PCRs are zeroed in debug mode | Remove the `debug` block, redeploy |
 | `caution apps build` PCR0/PCR1 ≠ production, but `caution verify` passes | The tool commits (`bootproof`/`enclaveos`/`steve`/`locksmith`) compiled into the CLI as `DEFAULT_*_COMMIT` are stale vs what production deployed; `verify` uses the deployed manifest's commits, your local build used the stale defaults | Read the commits from the deployed manifest (`curl <app-url>/attestation \| jq`) and pass them as `BOOTPROOF_COMMIT=…` etc. to `caution apps build`. See "tool commits are the authoritative reproduction inputs" above. |
+| `caution verify` PCR0/PCR1 mismatch that survives `cache=false`, matching commits, and a clean redeploy — content identical, only a file mode differs | A committed non-exec file `COPY`ed from the build context carries the build host's umask mode (0664 on Caution's Linux builder, 0644 on a umask-022 Mac). The bit lands in the measured initramfs. Verifying on a Mac is what exposes it. | Set the mode in-container: `COPY file /tmp/x` + `RUN chmod 0644 /tmp/x`, then `COPY --from=build /tmp/x /dest`. NOT `COPY --chmod=` (see next row). Confirm with the EIF cpio-archive comparison above (diff `cpio -tv` of the two ramdisks). See PCR mismatch diagnosis step 5. |
+| `caution verify` fails: `Failed to extract tar archive … failed to unpack etc/hostname … Permission denied` | The app Containerfile used `COPY --chmod=0644 <file> /etc/.../<file>`; `--chmod` also set the auto-created parent dirs (`/etc`, `/etc/pq`) to `0644` (no `x`). The enclave runs (root bypasses), but `caution verify` extracts the app tar as your non-root user and can't traverse the dir. | Drop `--chmod`; set the file mode in a build stage and `COPY --from=build` it, so parents are created at `0755`. Clear the crashed repro cache: `rm -rf ~/.cache/caution/reproductions/local/<app_commit>-*`. |
 | Port forwarding not working in QEMU | `pci=off` in kernel cmdline, or Nitro kernel (no virtio-net driver) | Use standard kernel, remove `pci=off` |
 | App image build fails with `wget: error getting response: Connection reset by peer` | busybox `wget` has no TLS — can't fetch `https://` URLs inside a stagex pallet | Vendor the tarball locally: `curl -sL <url> -o file.tar.gz`, commit it, use `COPY file.tar.gz .` instead of `wget` in the Containerfile |
 | `locksmithd` panics: `has bundle: No such file or directory` | Two causes: (a) the app image is missing `/etc/caution/bundle.json` — using `env::vault` does not inject it; or (b) the bundle IS `ADD`ed but `build` sets `binary`, which extracts only that one file and drops `/etc/caution/`. | (a) `ADD .caution/quorum-bundle.json /etc/caution/bundle.json` and `ADD .caution/secrets/ /etc/caution/secrets/` in the Containerfile. (b) Remove `binary` and deploy via `containerfile` so the full image filesystem becomes the EIF rootfs. |
