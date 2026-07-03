@@ -235,6 +235,39 @@ step, not `CACHED`) — otherwise the second build proved nothing. Once proven,
 record the hash and gate future rebuilds against it (`shasum -a 256 -c`),
 failing non-zero on any mismatch.
 
+## When Reproducibility Fails: Bisect The Artifact Chain
+
+When two builds that *should* match don't (e.g. PCRs differ), do **not** theorize
+about the toolchain first ("must be QEMU", "kernel non-determinism", "codegen").
+Those hypotheses are usually wrong and cost hours. The mismatch is a byte
+difference — go find it mechanically, inputs → intermediate → output:
+
+1. **Inputs.** Checksum every file fed to `docker build` on both sides
+   (`find . -type f -print0 | sort -z | xargs -0 shasum`). Identical inputs
+   means the divergence is downstream, not in your staging.
+2. **Intermediate.** Decompress and diff the ramdisk / layer that feeds the
+   differing measurement (`gunzip` + `cpio -idmv`, then `diff -rq` the trees +
+   per-file `shasum`). For a Nitro EIF: PCR2 is the app ramdisk, PCR0/PCR1 the
+   kernel + boot ramdisk — a matching PCR2 with mismatched PCR0/1 tells you
+   exactly which archive to crack open.
+3. **Output.** The differing file names the cause. A *content* diff in a
+   compiled binary → a real determinism gap (unpinned dep, `--build-id`,
+   `SOURCE_DATE_EPOCH`). A *membership* diff (a file present in one archive,
+   absent in the other, all shared files identical) → the file never entered
+   the build **context**, not a build bug.
+
+**Docker-outside-of-docker gotcha (macOS).** A membership diff where the
+*missing files are the most-recently-written ones* points at the build context,
+not the recipe. If you run `docker build` from inside a container (mounted
+`docker.sock`) with the context on a **macOS bind mount** (VirtioFS/gRPC-FUSE),
+a write-then-immediately-build races the host→VM sharing layer: the daemon
+snapshots the context before the last writes propagate and silently drops them.
+Symptom here was a rebuilt rootfs missing three just-staged `/etc` files (incl.
+the Nitro root cert), yielding wrong PCR0/PCR1 while PCR2 matched. Fix: put the
+build context on a VM-coherent path — a named Docker **volume** or a
+container-internal dir — never a macOS bind mount. Native builds never hit this
+(CLI and daemon share one filesystem); it only appears under docker-outside-of-docker.
+
 ## Node.js / npm Pattern
 
 > **Reproducibility status:** Node.js builds are the hardest to make deterministic. The approach below reduces non-determinism but `npm` installs are not byte-for-bit reproducible across environments without additional tooling (e.g. pnpm with a content-addressed store). Treat this pattern as best-effort unless you can prove two independent `--no-cache` builds are identical.
