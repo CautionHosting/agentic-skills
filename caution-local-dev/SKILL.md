@@ -152,7 +152,8 @@ non-Linux workstation run them inside the Linux amd64 VM):
   **ephemeral** test Postgres (`postgres-test`, DB `caution_test`, dropped afterwards), runs all
   migrations, runs a `tests/e2e/*.sh` script against the live services, then tears everything down.
   Targets: `test-e2e` (happy-path/ports/env/ssh), `test-e2e-billing`, `test-e2e-billing-gates`,
-  `test-e2e-legal`, `test-e2e-byoc`, `test-e2e-platform-ports`, `test-e2e-ssh-units`.
+  `test-e2e-legal`, `test-e2e-byoc`, `test-e2e-platform-ports`, `test-e2e-ssh-units`,
+  `test-e2e-webauthn` (login/username-claim/QR).
 
 The e2e stack needs two pieces of config the dev `up.sh` doesn't — both handled by
 [`e2e.sh`](scripts/e2e.sh), the wrapper to use:
@@ -172,6 +173,13 @@ What it sets up (know it for debugging a raw `make test-e2e-*`):
    to `~/.config/caution/.env`. If it's absent the api container never starts
    (`docker: --env-file: open .env: no such file or directory`); `e2e.sh` stages it from
    `env.example`.
+
+When authoring a gateway e2e that reuses a session across steps, know that **`/auth/e2e-login`
+sessions are credential-bound**: the auth middleware resolves the user from their credential, so a
+step that `DELETE`s a user's `fido2_credentials` (or otherwise removes the credential) invalidates
+that user's `X-Session-ID` — every subsequent authed call with it returns **401**, not the status
+you were testing for. Order credential-destroying steps last, or mint a fresh `/auth/e2e-login`
+session afterward.
 
 The e2e scripts use `set -euo pipefail`, so a single failed `curl`/`psql` aborts the whole run at
 that step (the summary shows the steps that passed before it). When a run dies mid-suite, bring the
