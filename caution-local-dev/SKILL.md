@@ -28,8 +28,8 @@ Three Rust services plus Postgres, all on a Docker network `caution-network`:
 The stack is Linux/amd64 (StageX images, systemd units, x86 kernel) and runs Docker. You need
 **a Linux amd64 host with Docker** — a bare box, a cloud instance, or a local VM — and a way to
 run commands and reach its ports. On a non-Linux workstation (e.g. macOS/Apple Silicon) that
-means a Linux amd64 VM; any provider works (a cloud instance, Lima/UTM/Multipass, or an OrbStack
-`ubuntu-amd64` machine). All commands below run **inside that Linux environment**; adapt how you
+means a Linux amd64 VM; any provider works (a cloud instance, Lima/UTM/Multipass, or
+OrbStack). All commands below run **inside that Linux environment**; adapt how you
 shell into it and how you reach `localhost:8000`/`:8080` (direct, SSH tunnel, or the VM's
 forwarded ports) to your setup.
 
@@ -44,8 +44,9 @@ Two things to keep straight whatever you use:
 
 ## ⚠️ The cgroup wall (fix this first)
 
-In some nested/containerized Linux environments (notably LXC-based VMs, which OrbStack machines
-are), dockerd defaults to the **systemd cgroup driver**, which is broken there. Every `docker run`
+In some nested/containerized Linux environments (notably LXC-based VMs, which OrbStack
+machines are), dockerd defaults to the **systemd cgroup driver**, which is broken
+there. Every `docker run`
 (but not `docker build`) fails with:
 
 ```
@@ -196,7 +197,7 @@ make down-test-billing      # clean up when done
 | Symptom | Cause | Fix |
 |---|---|---|
 | `docker run` → `…cgroup…: Inappropriate ioctl for device` | dockerd on systemd cgroup driver in the LXC VM | Switch to `cgroupfs` + restart dockerd by hand (see cgroup wall) |
-| `Unit caution-postgres.service not found` / `make up` fails | systemd units not installed in a fresh VM | Run containers directly / use `~/caution-dev-up.sh` |
+| `Unit caution-postgres.service not found` / `make up` fails | systemd units not installed in a fresh VM | Run containers directly / use the bundled `scripts/up.sh` |
 | api exits: `DATABASE_URL must be set` / `prices.json not found` / `config.json not found` / `BUILDER_AMI_ID required` | missing boot config | Stage `~/.config/caution/.env` + `prices.json` + `config.json` with dummies |
 | gateway exits: `CSRF_SECRET environment variable must be set` | missing secret | Add `CSRF_SECRET=…` to the env file |
 | Endpoint `200` direct on `:8080` but `404` through `:8000` | gateway route registered under nested `/api`, or stale gateway image | Register root paths at the router root (not in the `/api` nest); rebuild `caution-gateway` |

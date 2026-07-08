@@ -1,49 +1,31 @@
 # Enclave Dev Skills
 
-Claude Code and Codex skills for building and debugging apps on the [Caution](https://caution.co) verifiable enclave platform.
+AI assistant skills for building and debugging apps on the [Caution](https://caution.co) verifiable enclave platform. Published at [codeberg.org/caution/agentic-skills](https://codeberg.org/caution/agentic-skills).
 
 ## Skills
 
-### [`stagex-reproducible-builds`](./stagex-reproducible-builds/SKILL.md)
+| Skill | Audience | What it covers |
+|---|---|---|
+| [`stagex-reproducible-builds`](./stagex-reproducible-builds/SKILL.md) | App builders | Reproducible, verifiable container images with [StageX](https://stagex.tools) — pallet selection, digest pinning, hermetic Rust/Go/C/C++ builds, PCR reproducibility verification |
+| [`caution-platform`](./caution-platform/SKILL.md) | App builders | Authoring `caution.hcl`, deploying and debugging Caution enclave apps — local QEMU, AWS Nitro, attestation testing, Locksmith secrets, STEVE encryption, PCR verification |
+| [`caution-local-dev`](./caution-local-dev/SKILL.md) | Platform devs | Running the Caution **platform itself** locally — api/gateway/postgres, Docker cgroup fixes, alpha/beta codes, e2e tests, image rebuilds |
+| [`fj-codeberg`](./fj-codeberg/SKILL.md) | Everyone | PRs, issues, releases, and repo ops on Codeberg via the `fj` CLI — required for all caution repos since `gh` can't reach Forgejo |
 
-Reproducible, verifiable container images with [StageX](https://stagex.tools).
+`caution-platform` and `caution-local-dev` target different audiences: the former is for **deploying customer enclave apps**, the latter is for **developing the platform itself**. `stagex-reproducible-builds` provides the reproducible image foundation that `caution-platform` deploys. `fj-codeberg` is the glue for any Codeberg repository operation across all of them.
 
-- Rust, Go, C/C++ build patterns with full vendoring
-- Pallet selection and digest pinning
-- `SOURCE_DATE_EPOCH`, `RUN --network=none`, hermetic builds
-- The `Containerfile`; PCR reproducibility verification checklist (`caution.hcl` authoring lives in `caution-platform`)
+## Install
 
-### [`caution-platform`](./caution-platform/SKILL.md)
-
-Write the Caution `caution.hcl`, and deploy/debug enclave apps locally and on AWS Nitro.
-
-- `caution.hcl` authoring — unit command, container input, ports, resources, features
-- Local QEMU debugging on a Linux host, or a Linux amd64 VM on macOS
-- Nitro bzImage vs standard x86_64 kernel — when and how to get each
-- Attestation endpoint testing (`/attestation` request format, expected errors)
-- Production health check failures, SSH debug mode, vsock and service logs
-
-### [`caution-local-dev`](./caution-local-dev/SKILL.md)
-
-Run, build, and debug the Caution **platform itself** locally (control plane, not a customer enclave).
-
-- Architecture: `gateway` (:8000) + `api` (:8080) + Postgres on `caution-network`; frontend baked into the gateway image
-- Needs a Linux amd64 host/VM with Docker; the dockerd **cgroup driver** fix (systemd → cgroupfs) for nested VMs
-- Booting without systemd: required env/config (`DATABASE_URL`, `prices.json`, `config.json`, `BUILDER_AMI_ID`, `CSRF_SECRET`), the `~/caution-dev-up.sh` launcher
-- Building images, the frontend `npm run build` → `make build-gateway` bake step
-- Generating an alpha/beta code to register; passkey login at `localhost`
-
-## Install For Claude Code
+### Claude Code
 
 ```bash
-for skill in stagex-reproducible-builds caution-platform caution-local-dev; do
+for skill in stagex-reproducible-builds caution-platform caution-local-dev fj-codeberg; do
   mkdir -p ~/.claude/skills/$skill
   curl -sL https://codeberg.org/caution/agentic-skills/raw/branch/main/$skill/SKILL.md \
     -o ~/.claude/skills/$skill/SKILL.md
 done
 ```
 
-## Install For Codex
+### Codex
 
 Clone this repo, then copy the skill folders into `~/.codex/skills` so Codex can discover both `SKILL.md` and `agents/openai.yaml`:
 
@@ -51,8 +33,36 @@ Clone this repo, then copy the skill folders into `~/.codex/skills` so Codex can
 git clone https://codeberg.org/caution/agentic-skills.git
 cd agentic-skills
 
-for skill in stagex-reproducible-builds caution-platform; do
+for skill in stagex-reproducible-builds caution-platform caution-local-dev; do
   mkdir -p ~/.codex/skills/$skill
   cp -R $skill/. ~/.codex/skills/$skill/
 done
 ```
+
+> `fj-codeberg` has no `agents/openai.yaml` and is skipped for Codex — it works fine via Claude Code or by running `fj` directly.
+
+### Crush
+
+Crush uses a local skills directory (default `~/.config/crush/skills/`):
+
+```bash
+git clone https://codeberg.org/caution/agentic-skills.git
+cd agentic-skills
+
+for skill in stagex-reproducible-builds caution-platform caution-local-dev fj-codeberg; do
+  mkdir -p ~/.config/crush/skills/$skill
+  cp -R $skill/. ~/.config/crush/skills/$skill/
+done
+```
+
+## Skill structure
+
+```
+skill-name/
+  SKILL.md          # Frontmatter (name, description) + full procedure
+  agents/
+    openai.yaml     # Codex agent interface (display name, default prompt)
+  scripts/          # Helper scripts referenced by the skill (caution-local-dev only)
+```
+
+`agents/openai.yaml` and `scripts/` are optional — only `SKILL.md` is required.
