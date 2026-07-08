@@ -69,6 +69,16 @@ Labels: `fj repo labels create <NAME> <COLOR_HEX> [--description <DESC>] [--excl
 
 IDs can be bare (`42`) or `owner/repo#42`.
 
+**Cross-repo access when the local repo has no matching remote.**
+`-R/--remote` only picks among local git remotes — it can't target a
+different repo you don't have a remote for (e.g. you're in `caution/platform`
+but the issue tracker lives on `caution/internal`). Use the `owner/repo#ID`
+ID form instead, which bypasses remote auto-detection:
+`fj issue view caution/internal#16 [body|comments]`,
+`fj issue comment caution/internal#16 "…"` (or `--body-file`),
+`fj issue close caution/internal#16 --with-msg "…"`. The same form works
+for `fj pr`, etc. (`fj release` uses `--repo <HOST/OWNER/NAME>` + `<NAME>` instead of `#ID` since releases are name-based, not numbered).
+
 ```bash
 fj issue create [TITLE] [--body <BODY>] [--body-file <FILE>] [--template <TEMPLATE>] [--no-template] [--web]
 fj issue edit <ID> title|body|comment|labels        # labels: --add <LABEL> --remove <LABEL>
@@ -108,6 +118,17 @@ Key PR creation patterns (all verified against v0.5.0 + upstream wiki):
   Bare `^` = upstream's default branch; `^branch` = a specific upstream branch.
   Same convention works for `fj pr checkout ^<ID>`.
 - Prefix the title with `WIP: ` to open it as a **draft** PR.
+
+**Reading PR comments — important split.** `fj pr view <ID> comments` only
+lists **issue-style** PR comments (the top-level thread on the PR). It does
+**not** list inline **review comments** on code lines, and will print
+"0 comments" even when a review with inline comments exists. This nearly
+hid a real review in practice. For inline review comments you must use the
+REST API (see "Forgejo REST API" below): list reviews via
+`GET /repos/{o}/{r}/pulls/{i}/reviews`, then
+`GET /repos/{o}/{r}/pulls/{i}/reviews/{rid}/comments` for each review. A PR
+can have zero issue-style comments but several inline review comments —
+always check both channels before concluding "no comments."
 
 ### Releases (`fj release`)
 
@@ -198,6 +219,27 @@ Example: `fj actions dispatch publish.yaml main --inputs version=10`
 - **Pagination**: `?page=<N>&limit=<N>` — response has `Link` + `x-total-count` headers;
   see `/settings/api` for limits
 - **Sudo** (admin only): `?sudo=<username>` or `Sudo: <username>` header
+- **Private repos**: unauthenticated requests (`webfetch`/`curl` without a
+  `token`) return **404** even for existing resources — Forgejo hides private
+  repos rather than 401-ing. Always prefer `fj` (which carries your auth) for
+  private repos; if you must use the REST API, inject `?token=<TOKEN>` or the
+  `Authorization: token <TOKEN>` header explicitly. Note: this only applies to
+  *private* repos — for public repos, unauthenticated GETs work fine and you
+  can skip the auth dance for read-only inspection.
+- **Reusing `fj`'s OAuth token for REST calls.** `fj auth login` (OAuth flow)
+  stores short-lived JWT access + refresh tokens at
+  `~/Library/Application Support/Cyborus.forgejo-cli/keys.json` (macOS) /
+  `~/.local/share/Cyborus.forgejo-cli/keys.json` (Linux). Structure:
+  `{"hosts":{"<instance>":{"token":"<JWT>","refresh_token":"<JWT>","expires_at":[y,doy,h,m,s,ns,...],"type":"OAuth","name":"<user>"}}}`.
+  The `token` field works as a bearer (`Authorization: token <JWT>`) but
+  expires in ~1h. `fj` refreshes it lazily on its own API calls but does
+  **not** expose refresh to scripts, and the OAuth client-id for `fj` is read
+  from `config/forgejo-cli/client_ids` and is not stable across builds (often
+  absent on the host), so you generally can't refresh it from `curl`. If the
+  cached token is expired, either (a) run any `fj` command that hits the API
+  to force a refresh then re-read the file, or (b) fall back to a long-lived
+  application token created at `/user/settings/applications` and registered
+  via `fj auth add-key`. Prefer (b) for scripted REST use.
 - For GETs, use a fetch/web tool (`curl` may be blocked). For writes, prefer `fj`;
   otherwise guide the user to run the command manually.
 
@@ -205,9 +247,16 @@ Operations that need the API (not in `fj`): **branch protection**
 (`POST /repos/{o}/{r}/branch_protections`), **webhooks**, **collaborators**
 (`PUT /repos/{o}/{r}/collaborators/{u}`), **commit statuses / CI**
 (`POST /repos/{o}/{r}/statuses/{sha}`), **file contents via API**
-(`/repos/{o}/{r}/contents/{path}`), **PR reviews**
-(`POST /repos/{o}/{r}/pulls/{i}/reviews`), **milestones**, **reactions**,
-**topics** (`PUT /repos/{o}/{r}/topics`), **diff/compare**
+(`/repos/{o}/{r}/contents/{path}`), **PR reviews** —
+`GET /repos/{o}/{r}/pulls/{i}/reviews` (list reviews; each has `state`
+`COMMENT`/`REQUEST_CHANGES`/`APPROVED` + `body`),
+`GET /repos/{o}/{r}/pulls/{i}/reviews/{rid}/comments` (inline comments
+within one review), `GET /repos/{o}/{r}/pulls/{i}/comments` (all inline
+review comments across the PR, flat), and `POST /repos/{o}/{r}/pulls/{i}/reviews`
+(create). The flat `GET /pulls/{i}/comments` endpoint has been observed to
+404 ("target couldn't be found") on codeberg.org even with a valid token —
+prefer the reviews → review-comments two-step if it's flaky. **milestones**,
+**reactions**, **topics** (`PUT /repos/{o}/{r}/topics`), **diff/compare**
 (`GET /repos/{o}/{r}/compare/{base}...{head}`), **raw/archive download**,
 **mirror-sync**, **notifications** (`GET /notifications`), **repo search across
 all repos** (`GET /repos/search?q=`), **user email management** (`/user/emails`).
