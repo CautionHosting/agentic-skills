@@ -72,12 +72,28 @@ IDs can be bare (`42`) or `owner/repo#42`.
 **Cross-repo access when the local repo has no matching remote.**
 `-R/--remote` only picks among local git remotes — it can't target a
 different repo you don't have a remote for (e.g. you're in `caution/platform`
-but the issue tracker lives on `caution/internal`). Use the `owner/repo#ID`
-ID form instead, which bypasses remote auto-detection:
-`fj issue view caution/internal#16 [body|comments]`,
-`fj issue comment caution/internal#16 "…"` (or `--body-file`),
-`fj issue close caution/internal#16 --with-msg "…"`. The same form works
-for `fj pr`, etc. (`fj release` uses `--repo <HOST/OWNER/NAME>` + `<NAME>` instead of `#ID` since releases are name-based, not numbered).
+but the issue tracker lives on `caution/internal`). Use the ID form instead,
+which bypasses remote auto-detection — but it must include the **host**:
+bare `caution/internal#16` fails with `cannot find repo, no host specified`
+even when your current remote is on the same instance. Prefix the host:
+`fj issue view codeberg.org/caution/internal#16 [body|comments]`,
+`fj issue comment codeberg.org/caution/internal#16 "…"` (or `--body-file`),
+`fj issue close codeberg.org/caution/internal#16 --with-msg "…"`. The same
+form works for `fj pr`, etc. (`fj release` uses `--repo <HOST/OWNER/NAME>` +
+`<NAME>` instead of `#ID` since releases are name-based, not numbered).
+
+**Editing a body/comment in place — two traps (apply to both `fj issue` and
+`fj pr`, which share the `title|body|comment|labels` edit subcommands).**
+- `edit <ID> body [NEW_BODY]` / `edit <ID> title [NEW_TITLE]` take the new
+  text as a **positional arg** — there is **no `--body-file`** on `edit`
+  (unlike `create`/`comment`, which have it). For a large body, pass it inline:
+  `fj issue edit <ID> body "$(cat body.md)"` (same for `fj pr edit`).
+- `view <ID> body` prints **rendered** text with each line quote-prefixed
+  (`> `), not the raw source. Never round-trip that back into `edit body` — the
+  `> ` prefixes corrupt tables/markdown. To edit a large existing body (e.g. a
+  status table) safely, fetch the **raw** source via the REST API `.body` field
+  (`GET /repos/{o}/{r}/issues/{n}` or `/pulls/{n}` → `body`), edit that, then
+  push it back with `edit body "$(cat …)"`.
 
 ```bash
 fj issue create [TITLE] [--body <BODY>] [--body-file <FILE>] [--template <TEMPLATE>] [--no-template] [--web]
