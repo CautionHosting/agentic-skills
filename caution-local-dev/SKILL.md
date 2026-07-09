@@ -91,7 +91,7 @@ cd scripts && CAUTION_REPO=/path/to/platform ./up.sh
 | `down-clean.sh` | Full reset — also drop the volume, network, host data dir (keeps images + config). |
 | `setup-config.sh` | Stage `~/.config/caution/{.env,prices.json,config.json}` with dev dummies. |
 | `fix-docker-cgroup.sh` | Switch dockerd to cgroupfs (the cgroup-wall fix); no-op on healthy Docker. |
-| `gen-alpha-code.sh` | Mint a registration code (see below). |
+
 | `e2e.sh` | Stage config + run a `make test-e2e-*` suite against an ephemeral test DB (see [Running tests locally](#running-tests-locally)). |
 
 Override `CAUTION_CFG`, `CAUTION_NETWORK`, `CAUTION_DB_VOLUME`, `CAUTION_*_PORT`, etc. — see
@@ -119,14 +119,27 @@ make build-api-dev build-gateway-dev  # faster debug builds (DEV_BUILD_ARGS)
 
 ## Register / log in (alpha codes)
 
-Registration is alpha-gated by the **`beta_codes`** table (note: table is `beta_codes`, flag is `--alpha-code`). Mint one with `scripts/gen-alpha-code.sh` (inserts a random code against the running DB).
+Registration is alpha-gated by the **`beta_codes`** table (note: table is `beta_codes`, flag is `--alpha-code`). Generate codes with the repo's `utils/generate-beta-codes.sh`:
 
 Then register with a passkey — `RP_ID=localhost`, `RP_ORIGINS` includes `http://localhost:8000`, so Touch ID / platform passkeys work against `localhost`:
 
-- **Dashboard:** open `http://localhost:8000`, register, paste the code, create passkey.
+```bash
+# generate 10 codes (default 50), against the running postgres container
+bash "$REPO/utils/generate-beta-codes.sh" 10
+```
+
+Then register with a passkey:
+
+- **Dashboard:** open `http://localhost:8000`, register, paste a code, create passkey.
 - **CLI:** `caution register --alpha-code <code>`.
 
 A code is valid while `used_at IS NULL` and unexpired; redemption sets `used_at`.
+
+To list only unused (available) codes:
+
+```bash
+docker exec -e PGPASSWORD=postgres postgres psql -U postgres -d caution -t -A -c "SELECT code FROM beta_codes WHERE used_at IS NULL ORDER BY created_at DESC;"
+```
 
 ## Verify it's working
 
@@ -205,3 +218,4 @@ make down-test-billing      # clean up when done
 | `caution-api`/`caution-gateway` missing from `docker images` | built on a different Docker engine than the one you're running against | Build and run on the same Linux host/engine |
 | e2e Step 1: `metering not responding` / metering exits `INTERNAL_SERVICE_SECRET must be set` | secret blank in `~/.config/caution/.env` | Set a non-empty `INTERNAL_SERVICE_SECRET` (re-run `setup-config.sh` / use `e2e.sh`) |
 | e2e: `docker: --env-file: open .env: no such file or directory` (`run-api-test`) | no repo-root `.env` | `cp env.example .env` in the repo (or use `e2e.sh`) |
+| Toggling a flag in `~/.config/caution/.env` + `docker restart` has no effect | `docker restart` reuses the container's original env; `--env-file` is only read at `docker run` time | Edit the `.env`, then recreate the container (`up.sh`) — and `sed -i` the old line first to avoid duplicates |
