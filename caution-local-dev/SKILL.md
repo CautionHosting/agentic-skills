@@ -41,6 +41,33 @@ Two things to keep straight whatever you use:
   at the engine that has them.
 - **Port reachability is yours to arrange.** `curl http://localhost:8000/...` only works from where
   those ports are exposed; from another machine use the host's IP or a tunnel.
+- **Worktree/branch awareness.** Images are built from whatever path you pass to `make build-*`.
+  If you're in a `git worktree` or a different branch, build and run `up.sh` with `CAUTION_REPO`
+  pointing at that checkout — otherwise the stack silently runs stale code from another branch.
+  Verify the running commit matches your checkout:
+  `curl -s http://localhost:8000/.well-known/caution/build-inputs | jq .platform.commit`
+  should equal `git rev-parse HEAD`.
+
+## Provisioning a bare Linux amd64 VM
+
+A fresh box (OrbStack `ubuntu-amd64`, a cloud instance, whatever) has none of this. One-time setup:
+
+```bash
+sudo apt-get update &&
+sudo apt-get install -y docker.io make git curl jq postgresql-client
+sudo usermod -aG docker $USER   # then start a new shell / `newgrp docker`
+```
+
+- **`docker.io`** — the stack is all Docker images/containers; also apply the cgroupfs fix below
+  if you're on a nested/LXC-based VM (OrbStack included) — required before any `docker run`
+  (`docker build` works fine without it).
+- **`make`** — every build/up/down/test entrypoint is a `make` target.
+- **`postgresql-client`** (`psql`) — needed for `utils/admin` and any other host-side script that
+  queries Postgres directly (containers ship their own `psql`, but host scripts don't).
+- **`jq`** — used by several `utils/*.sh` scripts and handy for `curl | jq` on JSON endpoints.
+- No Rust/Go/cargo toolchain needed on the VM — all service builds happen inside Docker via
+  `make build-*`. Only install a native toolchain for things outside the container build path
+  (e.g. `cargo test` for unit tests — see "Running tests locally" below).
 
 ## ⚠️ The cgroup wall (fix this first)
 
@@ -96,6 +123,40 @@ cd scripts && CAUTION_REPO=/path/to/platform ./up.sh
 
 Override `CAUTION_CFG`, `CAUTION_NETWORK`, `CAUTION_DB_VOLUME`, `CAUTION_*_PORT`, etc. — see
 `scripts/_common.sh`.
+
+**`up.sh` does not start the email service** — only postgres/api/gateway. If you need real
+(test-mode) email delivery — verifying a user's email, testing notification flows — build and
+start it separately:
+
+```bash
+make build-email-dev && make run-email
+```
+
+Starts on `http://localhost:8082`. With `EMAIL_TEST_MODE=true` (default in `.env`), sent emails
+are logged, not delivered — inspect via `curl -s http://localhost:8082/sent | jq`. Without this,
+email-dependent flows fail silently or error client-side (e.g. "We couldn't send the verification
+link").
+
+### Running `utils/admin` (or other host-side scripts needing DB/API access)
+
+`utils/admin` runs on the host (not in a container) and sources `platform/.env` (gitignored,
+distinct from `~/.config/caution/.env` which the containers use). Two things commonly break it on
+a fresh checkout:
+
+1. **No `psql` client on the host.** Install once: `sudo apt-get install -y postgresql-client`
+   (also covered in "Provisioning a bare Linux amd64 VM" above).
+2. **`platform/.env` is a stale template.** It ships with `API_SERVICE_URL=http://api:8080` (a
+   container-network hostname, unreachable from the host) and a blank `INTERNAL_SERVICE_SECRET`.
+   Fix both to match the running stack before using commands that call the API (e.g.
+   `publish-legal-doc`'s notify step):
+   ```bash
+   grep INTERNAL_SERVICE_SECRET ~/.config/caution/.env   # the real secret the running stack uses
+   # then in platform/.env (gitignored — safe to edit):
+   #   API_SERVICE_URL=http://localhost:8080
+   #   INTERNAL_SERVICE_SECRET=<value from above>
+   ```
+   Postgres itself is reachable at `localhost:5432` from the host (container publishes the port),
+   so `DB_HOST`/`DB_PORT` defaults in `utils/admin` work as-is.
 
 ### Why the services need config to boot
 
