@@ -126,6 +126,65 @@ fj pr merge [PR] [-M/--method merge|rebase|rebase-merge|squash|manual] [-d/--del
 fj pr browse [ID]
 ```
 
+### Signed merges: avoid `fj pr merge` on production repos
+
+`fj pr merge` (like the web UI) creates the merge commit **server-side, signed
+by the Forgejo instance's key**. That signature proves only "the API was called
+with a valid session token" — a stolen token or a platform compromise forges it
+indistinguishably. It is not a statement by a human reviewer.
+
+For any repo gating production, releases, customer data, or security-sensitive
+code, merge **locally** with your own hardware-backed key instead:
+
+```bash
+fj pr checkout 42                              # or: git fetch origin pull/42/head
+git switch main && git pull --ff-only
+git merge --no-ff feature-branch               # signs via commit.gpgSign / merge.gpgSign
+git push origin main
+fj pr close 42 --with-msg "Merged locally as <sha> (signed)"
+```
+
+Why `--no-ff` specifically, and not the other `-M/--method` values:
+
+| Mode | Merge record | Author signatures |
+|---|---|---|
+| fast-forward | none — pointer just moves; nothing to sign | preserved |
+| `merge` / `--no-ff` | signed two-parent commit binding base + branch tip | preserved |
+| `squash` | one new commit authored by the merger | **destroyed** |
+| `rebase` / `rebase-merge` | commits replayed onto new SHAs | **destroyed** (re-signing with `-S` attributes them to the rebaser) |
+
+`--no-ff` is the only mode that keeps the author's signatures *and* adds an
+independent reviewer signature over the exact resulting tree and both parents.
+Cost: non-linear history. Take it for anything that gates production.
+
+Set signing on by default (see the user's `~/.gitconfig` conventions):
+
+```gitconfig
+[commit]
+    gpgSign = true
+[merge]
+    gpgSign = true
+```
+
+Interactive signing (pinentry) times out under tool execution — give the user
+the `git merge` / `git push` commands to run themselves rather than invoking them.
+
+### Branch protection to pair with it
+
+`fj` has no branch-protection command; use the API
+(`POST /repos/{o}/{r}/branch_protections`). Fields worth setting on `main`:
+
+- `enable_push: false` (or restrict to a whitelist) — no direct pushes.
+- `require_signed_commits: true` — rejects unsigned commits and unsigned merges.
+- `enable_status_check: true` + `status_check_contexts` — required CI.
+- `required_approvals` ≥ 1, `block_on_rejected_reviews: true`,
+  `dismiss_stale_approvals: true`.
+- `enable_force_push: false` — force pushes stay off.
+
+Note the tension: `enable_push: false` blocks the local signed-merge push above.
+Either whitelist the maintainers who merge (`push_whitelist_usernames`), or accept
+the platform-signed merge on lower-value repos.
+
 Key PR creation patterns (all verified against v0.5.0 + upstream wiki):
 - `-A/--autofill`: populate title/body from commits.
 - `-a/--agit`: create the PR straight from local commits via Forgejo's AGit workflow —
@@ -296,7 +355,8 @@ fj pr create -aA
 fj repo fork owner/repo --name my-fork
 fj pr create --base ^ "Fix something"          # ^ targets upstream parent
 
-# Merge + delete branch, then block on CI
+# Merge + delete branch, then block on CI (low-value repos only —
+# see "Signed merges" above for production/release repos)
 fj pr merge --method squash --delete --title "Merge PR #42"
 fj pr status --wait
 

@@ -235,6 +235,29 @@ step, not `CACHED`) — otherwise the second build proved nothing. Once proven,
 record the hash and gate future rebuilds against it (`shasum -a 256 -c`),
 failing non-zero on any mismatch.
 
+### Same-host is the weak check; independent hosts is the strong one
+
+Two builds on one machine only prove **temporal** determinism — timestamps, file
+ordering, RNG, parallelism. Everything the host holds constant stays constant,
+so host-derived inputs slip through invisibly: umask (see the `COPY` file-mode
+trap above), absolute build paths, kernel/CPU feature detection, locale, TZ,
+Docker/buildkit version.
+
+Reproduce on a **second host with a different operator and different access
+rights** before making a reproducibility claim to anyone outside the team. That
+is what catches host leakage, and it is also what makes the claim meaningful —
+a build only one person can produce is an assertion, not evidence. `caution
+verify` is effectively this check performed by a third party.
+
+| Check | Catches | Supports the claim |
+|---|---|---|
+| Same host, `--no-cache`, twice | timestamps, ordering, parallelism | "deterministic on my machine" |
+| Second host, different operator | + umask, paths, toolchain, locale, kernel | "independently reproducible" |
+| N independent parties, published hashes | + operator compromise | "multi-party verified" |
+
+Cheapest way to get a real second host: run the second build in CI, or in a VM
+with a different umask (`umask 002`) and a different build directory path.
+
 ## When Reproducibility Fails: Bisect The Artifact Chain
 
 When two builds that *should* match don't (e.g. PCRs differ), do **not** theorize
@@ -439,6 +462,35 @@ enclave "main" {
 The full config (`build`, `network`, `resources`, features, secrets) is authored
 with the `caution-platform` skill — see its `caution.hcl` section for the field
 reference. A legacy key-value `Procfile` is still accepted as a fallback.
+
+## What To Publish Per Release
+
+A reproducible build is only useful if a third party can find out *what* to
+reproduce. For each release, retain and publish alongside the artifact:
+
+- **Source commit** — the exact git SHA, not a tag (tags move).
+- **Pinned inputs** — the resolved StageX digests, lockfile hashes, and any
+  vendored-tarball checksums used by that build.
+- **Artifact hashes** — `sha256sums-<gitrev>.txt` covering the OCI tarball and,
+  for Caution, the EIF plus its PCR0/PCR1/PCR2 values.
+- **Builder identity and environment** — who built it, on what platform, with
+  which buildx version and `SOURCE_DATE_EPOCH`.
+- **Signatures** — sign the release tag and the checksum file with a
+  hardware-backed key. Sign the checksums file, not each artifact individually;
+  one signature then covers the whole set. Do not treat the forge's "verified"
+  badge as the trust root (see the fj-codeberg skill's signed-merge section).
+- **SBOM** — dependency names, versions, and hashes. For StageX builds most of
+  this is already implied by the pinned digests and lockfile; an explicit SBOM
+  mainly helps downstream vulnerability tracking, not reproducibility.
+
+For Caution deployments the attestation manifest already carries the source
+commit, the four tool commits, and the run command — so it substitutes for much
+of the above *for the deployed enclave*. It does not cover artifacts you
+distribute outside the enclave (CLIs, SDKs, client libraries); those still need
+signed tags and checksums of their own.
+
+Keep release signing keys separate from CI credentials, and do not publish
+packages from an ordinary developer laptop.
 
 ## Verification Checklist
 
