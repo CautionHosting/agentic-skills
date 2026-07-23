@@ -178,6 +178,17 @@ make build-api-dev build-gateway-dev  # faster debug builds (DEV_BUILD_ARGS)
 - `enclave-builder` is compiled into `caution-api`, so `make build-api` picks up changes to it.
 - Image build runs fine under the broken cgroup driver; only `docker run` needs the cgroupfs fix.
 
+### Fast inner loop (API-only changes)
+
+When iterating on API code only, skip the full `make up` and rebuild just the api image + restart only that container:
+
+```bash
+make build-api-dev run-api    # rebuild dev image, restart only api
+docker logs -f api            # watch boot / runtime logs
+```
+
+This avoids rebuilding gateway/email/metering and is the tightest loop for API work. For systemd-based setups (where `make up` manages the services), the equivalent is `make build-api-dev` then `systemctl --user restart caution-api`. The same pattern applies per-service: `make build-gateway-dev run-gateway`, `make build-email-dev run-email`, etc.
+
 ## Register / log in (alpha codes)
 
 Registration is alpha-gated by the **`beta_codes`** table (note: table is `beta_codes`, flag is `--alpha-code`). Generate codes with the repo's `utils/generate-beta-codes.sh`:
@@ -201,6 +212,17 @@ To list only unused (available) codes:
 ```bash
 docker exec -e PGPASSWORD=postgres postgres psql -U postgres -d caution -t -A -c "SELECT code FROM beta_codes WHERE used_at IS NULL ORDER BY created_at DESC;"
 ```
+
+### Credit codes (for billing/metering testing)
+
+To test paid plans, billing flows, or metering without real payment, generate credit codes that add balance to a user's account. `utils/generate-credit-codes.sh` inserts into the credit codes table:
+
+```bash
+# generate 50 codes worth $100 each (default count 1, default container "postgres")
+bash "$REPO/utils/generate-credit-codes.sh" 100 50
+```
+
+Args: `<amount_dollars> [count] [container]`. Amount is a positive integer (dollars, not cents). These let you test billing-gated features, plan upgrades, and metering against a local stack without Paddle or real payment.
 
 ## Verify it's working
 
