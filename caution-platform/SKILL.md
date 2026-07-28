@@ -65,7 +65,7 @@ Key points:
     1. **Env-prefix in `run:` is split across `command` and `args`.** `migrate-procfile` shlex-splits `run:` and takes the first token as `command`, so `run: FOO=1 /usr/bin/app` becomes `command = "FOO=1"`, `args = ["/usr/bin/app"]`. This is handled correctly by the platform: leading `NAME=value` tokens in `command` are treated as inline env assignments, so the result runs `FOO=1 /usr/bin/app` as expected. Review the output to confirm the split looks right.
     2. **`locksmith: true` is dropped without warning.** This is expected — HCL has no `locksmith` field (it's implied by `env::vault`), and the Procfile doesn't say which secrets to vault, so the migrator can't synthesize the `env::vault(...)` entries. But it emits no warning. Re-add Locksmith by hand: reference each secret with `env::vault("NAME")` in the unit `env` map (any `env::vault` enables Locksmith — see Secrets below).
 - `caution apps build` is **local inspection only** (build the enclave image to look at it / QEMU-debug it). It is not a deploy step.
-- **`caution apps build` builds from committed `HEAD`, not your working tree.** The output/cache dir is keyed by the HEAD commit sha (`~/.cache/caution/build/local/<HEAD_sha>/eif-stage/`), and uncommitted edits to `Containerfile` / app sources are **not** picked up — the build silently uses the last commit. So to test a Containerfile fix you must **commit first, then build** (same as deploy). If a fix "isn't taking effect," check `git log -1` before assuming a caching problem; `--no-cache` won't help if the change isn't committed.
+- **`caution apps build` builds the current working directory, but its Docker image tag is derived from `HEAD`.** With the cache enabled, uncommitted application/Containerfile changes can therefore reuse an image built from older content. The EIF cache key also includes the parsed deployment configuration, so an uncommitted `caution.hcl` change does not reuse an EIF with different generated `run.sh` configuration. Use a clean committed tree for reproducible evidence; use `--no-cache` when intentionally testing working-tree changes or a newly compiled `DEFAULT_*_COMMIT`.
 - `caution apps create` creates the app record on Caution (done during `caution init`); it is not the deploy mechanism itself.
 - These commands are **interactive** (FIDO2/WebAuthn signing) — wrapping them in a Makefile/CI adds little and can't be fully automated. Keep ops Makefiles to local build/test/reproducibility (`go build`, `vite build`, the two-build `cmp` repro check) and run the `caution` commands directly.
 - **Commit** `.caution/deployment.json` (app resource ID, needed for CLI to target the right app), `.caution/quorum-bundle.json`, and `.caution/secrets/*.asc`. **Do not commit** plaintext inputs (`.env`) or generated private keyrings (e.g. `alice.private.asc`). Build output (EIF files) should remain gitignored.
@@ -376,15 +376,24 @@ The digest is pinned in your `Containerfile.eif` — prefer that one over this e
 **Standard x86_64 kernel** — enables networking and port access (needed to test HTTP endpoints):
 ```bash
 docker run --rm -v "$(pwd):/out" ubuntu:24.04 \
-  bash -c "apt-get update -q && apt-get install -y linux-image-generic \
-    && chmod 644 /boot/vmlinuz-* \
-    && cp /boot/vmlinuz-*-generic /out/vmlinuz-amd64"
+  bash -euc 'apt-get update -q
+    apt-get install -y linux-image-generic
+    kernel="$(find /boot -maxdepth 1 -type f -name "vmlinuz-*-generic" | sort | tail -n 1)"
+    test -n "$kernel"
+    chmod 0644 "$kernel"
+    cp "$kernel" /out/vmlinuz-amd64'
 ```
 On an amd64 host or VM this runs natively. If you must build it on an arm64 host, add `--platform linux/amd64` to the `docker run` (and note that `apt-get download linux-image-generic:amd64` won't work on arm64 unless amd64 is added first with `dpkg --add-architecture amd64`).
 
 ### Getting the rootfs
 
-After `caution apps build`, the rootfs is at `eif-stage/output/rootfs.cpio.gz` in the app directory (also cached under `~/.cache/caution/build/.../`). Pass this as `-initrd` — never pass the `.eif` directly.
+After `caution apps build`, copy the exact path printed under `=== Build Directory ===` / `Location:`:
+
+```bash
+BUILD_DIR=<printed-location>
+```
+
+The rootfs is then `$BUILD_DIR/output/rootfs.cpio.gz`. The default location is under `~/.cache/caution/build/local/`; it is not normally written into the app directory. Pass the rootfs as `-initrd` — never pass the `.eif` directly.
 
 ### QEMU commands
 
@@ -393,7 +402,7 @@ After `caution apps build`, the rootfs is at `eif-stage/output/rootfs.cpio.gz` i
 qemu-system-x86_64 \
   -m 512M -nographic \
   -kernel ./bzImage \
-  -initrd ./eif-stage/output/rootfs.cpio.gz \
+  -initrd "$BUILD_DIR/output/rootfs.cpio.gz" \
   -append "console=ttyS0 reboot=k panic=1 nomodules nit.target=/run.sh"
 ```
 
@@ -402,13 +411,13 @@ qemu-system-x86_64 \
 qemu-system-x86_64 \
   -m 512M -nographic \
   -kernel ./vmlinuz-amd64 \
-  -initrd ./eif-stage/output/rootfs.cpio.gz \
+  -initrd "$BUILD_DIR/output/rootfs.cpio.gz" \
   -append "console=ttyS0 reboot=k panic=1 nomodules nit.target=/run.sh" \
-  -netdev user,id=net0,hostfwd=tcp:0.0.0.0:8083-:8083,hostfwd=tcp:0.0.0.0:49502-:49502 \
+  -netdev user,id=net0,hostfwd=tcp:127.0.0.1:8083-:8083,hostfwd=tcp:127.0.0.1:49500-:49500,hostfwd=tcp:127.0.0.1:49502-:49502 \
   -device virtio-net-pci,netdev=net0
 ```
 
-The `hostfwd` ports must match the `ingress` ports in your `caution.hcl` (plus the attestation port).
+The application `hostfwd` ports must match the `ingress` ports in your `caution.hcl`. Add STEVE `49500` when `e2e_encryption` is enabled and Bootproof `49502` for the local attestation-boundary check. Bind to `127.0.0.1` unless you intentionally want other machines to reach the guest.
 
 **Do NOT include `pci=off` in `-append`** — it disables PCI and breaks virtio-net.
 
@@ -419,6 +428,9 @@ Run these from inside the Linux environment (use `localhost`); from your host ma
 ```bash
 # App
 curl http://localhost:8083/
+
+# STEVE plaintext fallback — proves STEVE started and reached its app upstream
+curl http://localhost:49500/
 
 # Attestation — nonce is base64-encoded 32 bytes
 curl -X POST http://localhost:49502/attestation \
@@ -433,12 +445,16 @@ Expected attestation response locally (correct behavior — NSM not available in
 
 Any other error before NSM indicates a real problem.
 
+The production STEVE binary in the EIF cannot complete a protected session under QEMU because session establishment requires Nitro evidence from `/dev/nsm`. Treat QEMU as a package/start/routing smoke. For successful browser/SDK encryption without Nitro, run STEVE's explicit synthetic-attestation E2E separately; that validates protocol behavior but is not the production EIF binary. Platform contributors validating a changed `DEFAULT_STEVE_COMMIT` should use `caution-local-dev/scripts/test-enclave-component-pin.sh`, which builds a branch-local CLI and automates these package checks.
+
 ### Local limitations
 
 | Feature | Local QEMU | Production |
 |---|---|---|
 | App starts, logs visible | Yes | Yes |
 | Networking / port access | Standard kernel only | Yes (vsock tunnel) |
+| STEVE process + plaintext fallback routing | Yes, with port 49500 forwarded | Yes |
+| Successful production STEVE attested session | No (`/dev/nsm` absent) | Yes |
 | NSM / attestation document | No | Yes |
 | VSock proxies | No (AF_VSOCK absent in std kernel) | Yes |
 | PCR measurements | No | Yes |
@@ -546,7 +562,8 @@ When the ordered steps above don't identify the cause, compare the **ramdisk cpi
 - **Compare the cpio *archives*, never the *extracted trees*.** `cpio -idm` recreates files applying the local umask, which **erases mode differences** (both sides normalize to 0644) — exactly the bit you're hunting. Run `diffoscope` / `cmp` / `cpio -tv` on the `.cpio` files directly.
 
 ```bash
-caution apps build               # local repro: eif-stage/output/{enclave.eif,rootfs.cpio.gz}
+caution apps build               # copy the printed Build Directory Location
+BUILD_DIR=<printed-location>
 caution apps download-eif        # deployed EIF (filename shown in output)
 
 # Carve the ramdisk cpio from each EIF: scan gzip streams, keep the one whose
@@ -564,7 +581,7 @@ while True:
     i=j+3
 open(sys.argv[2],'wb').write(best); print(len(best),'bytes')
 PY
-gzip -dc eif-stage/output/rootfs.cpio.gz > repro.cpio   # macOS: use gzip -dc, not zcat
+gzip -dc "$BUILD_DIR/output/rootfs.cpio.gz" > repro.cpio   # macOS: use gzip -dc, not zcat
 
 # Best finish: diffoscope on the archives (parses newc headers, reports per-member
 # mode/owner/mtime AND content):

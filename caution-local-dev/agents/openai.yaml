@@ -1,4 +1,4 @@
 interface:
   display_name: "Caution Local Dev"
-  short_description: "Run, build, and debug the Caution platform services locally"
-  default_prompt: "Use $caution-local-dev to bring up the Caution platform (api/gateway/frontend + Postgres) locally on a Linux amd64 host/VM, fix a Docker cgroup-driver issue, or generate an alpha code to register."
+  short_description: "Run, build, and test the Caution platform locally"
+  default_prompt: "Use $caution-local-dev to run or test the Caution platform on Linux amd64, including branch-local CLI and QEMU EIF validation for enclave-component pin changes."

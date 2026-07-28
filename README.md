@@ -18,11 +18,16 @@ AI assistant skills for building and debugging apps on the [Caution](https://cau
 
 ### Claude Code
 
+Clone the repository and copy each complete skill directory so referenced helper
+scripts are installed alongside `SKILL.md`:
+
 ```bash
+git clone https://codeberg.org/caution/agentic-skills.git
+cd agentic-skills
+
 for skill in stagex-reproducible-builds caution-platform caution-local-dev webauthn-passkeys fj-codeberg; do
   mkdir -p ~/.claude/skills/$skill
-  curl -sL https://codeberg.org/caution/agentic-skills/raw/branch/main/$skill/SKILL.md \
-    -o ~/.claude/skills/$skill/SKILL.md
+  cp -R $skill/. ~/.claude/skills/$skill/
 done
 ```
 
