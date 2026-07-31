@@ -179,6 +179,42 @@ make build-api-dev build-gateway-dev  # faster debug builds (DEV_BUILD_ARGS)
 - `enclave-builder` is compiled into `caution-api`, so `make build-api` picks up changes to it.
 - Image build runs fine under the broken cgroup driver; only `docker run` needs the cgroupfs fix.
 
+### Remote-builder templates are separate deployment inputs
+
+Do not assume rebuilding `caution-api` makes changed
+`src/enclave-builder/templates/` files available on a provisioned EC2 builder.
+Trace the actual remote path:
+
+- The API uploads and checksums `remote-build-helper`, then invokes it from EC2
+  user data.
+- The helper resolves templates from `CAUTION_TEMPLATES_DIR`, then
+  `/app/templates`, then its compile-time `CARGO_MANIFEST_DIR/templates` path.
+- If user data transfers only the helper and does not set
+  `CAUTION_TEMPLATES_DIR`, the helper can fall back to files already on the
+  builder AMI. Those files may be stale relative to the API checkout.
+
+`FRAMEWORK_SOURCE`, `STEVE_REPO`, and `/.well-known/caution/build-inputs` are
+important provenance and drift signals, but they do not substitute for checking
+the actual `Containerfile.eif` consumed by the remote helper. In particular,
+changing a manifest/display URL does not rewrite a clone URL embedded in a
+template.
+
+When changing enclave templates or component repositories:
+
+1. Inspect `generate_builder_userdata` and confirm how both the helper and
+   templates reach EC2.
+2. Prefer a versioned, checksummed template bundle uploaded alongside the
+   helper, with `CAUTION_TEMPLATES_DIR` set explicitly. Rebuilding the AMI is a
+   valid but less agile alternative.
+3. Rebuild/recreate the API service; a teardown of Postgres or the whole dev
+   environment is unnecessary.
+4. Deploy a fresh test application. Existing EIFs and enclaves are immutable.
+5. Inspect the remote build artifact/log for the resolved clone URL and commit,
+   then confirm the live manifest and run `caution verify`.
+
+Treat `build-inputs` as "what this platform intends to build next," not proof
+of what a particular remote builder or already-running enclave consumed.
+
 ### Fast inner loop (API-only changes)
 
 When iterating on API code only, skip the full `make up` and rebuild just the api image + restart only that container:
