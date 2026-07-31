@@ -181,10 +181,18 @@ resources {
     port   = 8080
     e2e_encryption {
       enabled      = true
-      cors_origins = ["*"]
+      cors_origins = ["https://client.example.com"]
+      key_exchange = "xwing-draft10"
     }
   }
   ```
+
+  `key_exchange` is deployment-fixed: omit it for `x25519`, or set it to
+  `"xwing-draft10"`. Use explicit browser origins; current STEVE rejects `*`.
+  A UI served from loopback may need both `http://localhost:3000` and
+  `http://127.0.0.1:3000`, which are distinct origins. For the production
+  browser/WASM + Rust release gate, read
+  [references/steve-nitro.md](references/steve-nitro.md).
 
 - **Secrets (Locksmith)** — reference a managed secret with `env::vault("NAME")` in a unit's `env` map. **Using `env::vault` anywhere automatically enables Locksmith — there is no separate flag.** Prefer this over baking secrets into the image. **The app image must include `/etc/caution/bundle.json`** (the quorum bundle from `caution secret new`, stored at `.caution/quorum-bundle.json`) and `/etc/caution/secrets/*.asc` — `locksmithd` reads the bundle at startup and panics with `No such file or directory` if absent. `ADD` them explicitly: `ADD .caution/quorum-bundle.json /etc/caution/bundle.json` and `ADD .caution/secrets/ /etc/caution/secrets/`. **Do not set `binary`** — it strips `/etc/caution/`, so locksmithd still panics. Build from the full `containerfile` image; a `scratch` image with the static binary + bundle + encrypted secrets stays minimal and lets PCR2 measure the bundle. Locksmithd listens on reserved port 49504 for shard submissions.
 
