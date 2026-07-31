@@ -229,8 +229,9 @@ By default the script:
 5. Checks `manifest.json`, `Containerfile.eif`, generated `run.sh`, and the
    rootfs for the exact STEVE commit, selected suite, STEVE, Bootproof, and
    requested application paths.
-6. Boots the generated rootfs with a swapped standard x86_64 kernel, forwarding
-   the app port plus STEVE `49500` and Bootproof `49502`.
+6. Boots the generated rootfs with a swapped standard x86_64 kernel, matching
+   virtio-net support, and a QEMU-only network bootstrap overlay. The app port,
+   STEVE `49500`, and Bootproof `49502` are forwarded to the host.
 7. Compares the direct app response with STEVE's plaintext fallback response
    and requires Bootproof to reach the expected missing-NSM boundary.
 
@@ -239,11 +240,16 @@ For a pre-bump experiment only, `--override-steve-commit <sha>` explicitly sets
 the environment override; omit it when validating the committed default.
 `build`, `run`, and `smoke` modes expose the same phases separately. Run
 `./test-enclave-component-pin.sh --help` for all options.
+When running QEMU inside OrbStack, pass `--host-address 0.0.0.0` so OrbStack
+publishes the forwarded ports to macOS. The default `127.0.0.1` keeps them
+local to the Linux host or VM.
 
 The helper supports both official QEMU kernel modes:
 
-- `all` uses `--kernel-mode standard`: a standard x86_64 kernel is swapped in
-  so virtio networking and HTTP smoke tests work.
+- `all` uses `--kernel-mode standard`: a standard x86_64 kernel and its matching
+  virtio-net support are swapped in. A temporary initrd overlay configures the
+  fixed QEMU user-network address before handing off to the generated
+  `/run.sh`; the built EIF and generated rootfs remain unchanged.
 - For the closest boot/package compatibility check, first run `build`, copy its
   printed `BUILD_DIR`, then run:
 

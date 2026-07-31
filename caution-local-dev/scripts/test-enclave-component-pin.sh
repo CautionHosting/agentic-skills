@@ -39,10 +39,14 @@ QEMU/smoke options:
   --build-dir DIR                   Printed `Location:` from apps build.
   --app-port PORT                   Guest/host application port (default: 8083).
   --app-path PATH                   HTTP path to test (default: /).
+  --host-address ADDRESS            QEMU host-forward bind address
+                                     (default: 127.0.0.1). Use 0.0.0.0 inside
+                                     OrbStack to publish ports to macOS.
   --kernel-mode MODE                standard (default, networking) or
                                      nitro (exact pinned kernel, logs only).
   --kernel FILE                     Explicit kernel for the selected mode.
   --refresh-kernel                  Rebuild/re-extract the cached kernel.
+  --cpus COUNT                      QEMU virtual CPUs (default: 1).
   --memory-mb MB                    QEMU memory (default: 1024).
 
 Environment:
@@ -87,8 +91,12 @@ KEY_EXCHANGE="XWING-DRAFT10"
 BUILD_DIR=""
 APP_PORT="8083"
 APP_PATH="/"
+HOST_ADDRESS="127.0.0.1"
 KERNEL_MODE="standard"
 KERNEL_PATH=""
+STANDARD_NETWORK_BUNDLE_DIR=""
+QEMU_INITRD_PATH=""
+CPUS="1"
 MEMORY_MB="1024"
 ALLOW_DIRTY=0
 REFRESH_KERNEL=0
@@ -150,6 +158,11 @@ while [[ $# -gt 0 ]]; do
       APP_PATH="$2"
       shift 2
       ;;
+    --host-address)
+      require_value "$1" "${2:-}"
+      HOST_ADDRESS="$2"
+      shift 2
+      ;;
     --kernel)
       require_value "$1" "${2:-}"
       KERNEL_PATH="$2"
@@ -163,6 +176,11 @@ while [[ $# -gt 0 ]]; do
     --refresh-kernel)
       REFRESH_KERNEL=1
       shift
+      ;;
+    --cpus)
+      require_value "$1" "${2:-}"
+      CPUS="$2"
+      shift 2
       ;;
     --memory-mb)
       require_value "$1" "${2:-}"
@@ -189,6 +207,7 @@ done
 source "$SCRIPT_DIR/_common.sh"
 
 TEMP_FILES=()
+TEMP_DIRS=()
 TEMP_CONTAINERS=()
 QEMU_PID=""
 
@@ -200,6 +219,10 @@ cleanup() {
   if [[ ${#TEMP_FILES[@]} -gt 0 ]]; then
     rm -f "${TEMP_FILES[@]}"
   fi
+  local dir
+  for dir in "${TEMP_DIRS[@]}"; do
+    rm -rf -- "$dir"
+  done
   local container
   for container in "${TEMP_CONTAINERS[@]}"; do
     docker rm -f "$container" >/dev/null 2>&1 || true
@@ -416,23 +439,81 @@ prepare_standard_kernel() {
   kernel_cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/caution/qemu"
   mkdir -p "$kernel_cache_dir"
   KERNEL_PATH="$kernel_cache_dir/vmlinuz-amd64"
+  STANDARD_NETWORK_BUNDLE_DIR="$kernel_cache_dir/qemu-network-amd64"
 
-  if [[ -f "$KERNEL_PATH" && "$REFRESH_KERNEL" -ne 1 ]]; then
-    log "using cached QEMU kernel: $KERNEL_PATH"
+  if [[ -f "$KERNEL_PATH" \
+      && -f "$STANDARD_NETWORK_BUNDLE_DIR/.complete" \
+      && "$REFRESH_KERNEL" -ne 1 ]]; then
+    log "using cached QEMU kernel and network modules: $KERNEL_PATH"
     return
   fi
 
-  log "building a standard x86_64 QEMU kernel from $kernel_image"
+  rm -rf -- "$STANDARD_NETWORK_BUNDLE_DIR"
+  log "building a standard x86_64 QEMU kernel and network support from $kernel_image"
   docker run --rm -v "$kernel_cache_dir:/out" "$kernel_image" \
     bash -euc '
+      export DEBIAN_FRONTEND=noninteractive
       apt-get update -q
-      apt-get install -y linux-image-generic
+      kernel_package="$(
+        apt-cache depends linux-image-generic \
+          | awk '"'"'$1 == "Depends:" && $2 ~ /^linux-image-[0-9].*-generic$/ {
+              print $2
+              exit
+            }'"'"'
+      )"
+      test -n "$kernel_package"
+      apt-get install -y --no-install-recommends \
+        kmod "$kernel_package" xz-utils zstd
       kernel="$(find /boot -maxdepth 1 -type f -name "vmlinuz-*-generic" | sort | tail -n 1)"
       test -n "$kernel"
+      version="$(basename "$kernel")"
+      version="${version#vmlinuz-}"
+      bundle=/out/qemu-network-amd64
+      owner="$(stat -c "%u:%g" /out)"
+
+      rm -rf "$bundle"
+      mkdir -p "$bundle/modules"
+      : > "$bundle/modules.list"
+
+      index=0
+      network_driver_found=0
+      while read -r directive module _; do
+        if test "$directive" = builtin; then
+          network_driver_found=1
+          continue
+        fi
+        test "$directive" = insmod || continue
+        test -f "$module"
+        network_driver_found=1
+
+        filename="$(basename "$module")"
+        filename="${filename%.zst}"
+        filename="${filename%.xz}"
+        filename="${filename%.gz}"
+        printf -v output_name "%03d-%s" "$index" "$filename"
+        output="$bundle/modules/$output_name"
+
+        case "$module" in
+          *.zst) zstd -q -d -c "$module" > "$output" ;;
+          *.xz)  xz -d -c "$module" > "$output" ;;
+          *.gz)  gzip -d -c "$module" > "$output" ;;
+          *)     cp "$module" "$output" ;;
+        esac
+
+        printf "/qemu-network/modules/%s\n" "$output_name" \
+          >> "$bundle/modules.list"
+        index=$((index + 1))
+      done < <(modprobe --set-version "$version" --show-depends virtio_net)
+
+      test "$network_driver_found" = 1
+      touch "$bundle/.complete"
       chmod 0644 "$kernel"
       cp "$kernel" /out/vmlinuz-amd64
+      chown -R "$owner" /out/vmlinuz-amd64 "$bundle"
     '
   [[ -f "$KERNEL_PATH" ]] || die "kernel build did not produce $KERNEL_PATH"
+  [[ -f "$STANDARD_NETWORK_BUNDLE_DIR/.complete" ]] \
+    || die "kernel build did not produce the QEMU network module bundle"
 }
 
 prepare_nitro_kernel() {
@@ -485,25 +566,75 @@ prepare_kernel() {
   esac
 }
 
+prepare_standard_network_initrd() {
+  local rootfs="$1"
+  local stage_dir overlay combined
+
+  require_command cpio
+  require_command gzip
+
+  stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/caution-qemu-network.XXXXXX")"
+  TEMP_DIRS+=("$stage_dir")
+  mkdir -p "$stage_dir/qemu-network/modules"
+  : > "$stage_dir/qemu-network/modules.list"
+
+  if [[ -n "$STANDARD_NETWORK_BUNDLE_DIR" ]]; then
+    cp "$STANDARD_NETWORK_BUNDLE_DIR/modules.list" \
+      "$stage_dir/qemu-network/modules.list"
+    if [[ -s "$STANDARD_NETWORK_BUNDLE_DIR/modules.list" ]]; then
+      cp "$STANDARD_NETWORK_BUNDLE_DIR"/modules/* \
+        "$stage_dir/qemu-network/modules/"
+    fi
+  fi
+
+  cp "$SCRIPT_DIR/qemu-network-init.sh" "$stage_dir/qemu-run.sh"
+  chmod 0755 "$stage_dir/qemu-run.sh"
+
+  overlay="$(mktemp "${TMPDIR:-/tmp}/caution-qemu-network.XXXXXX.cpio.gz")"
+  combined="$(mktemp "${TMPDIR:-/tmp}/caution-qemu-rootfs.XXXXXX.cpio.gz")"
+  TEMP_FILES+=("$overlay" "$combined")
+
+  (
+    cd "$stage_dir"
+    find . -print0 \
+      | LC_ALL=C sort -z \
+      | cpio --null -o -H newc 2>/dev/null \
+      | gzip -n > "$overlay"
+  )
+  cat "$rootfs" "$overlay" > "$combined"
+  QEMU_INITRD_PATH="$combined"
+}
+
 qemu_args() {
   local rootfs="$BUILD_DIR/output/rootfs.cpio.gz"
+  local initrd target
   local forwards
 
   [[ -f "$rootfs" ]] || die "missing QEMU rootfs: $rootfs"
+  initrd="$rootfs"
+  target="/run.sh"
+
+  if [[ "$KERNEL_MODE" == "standard" ]]; then
+    prepare_standard_network_initrd "$rootfs"
+    initrd="$QEMU_INITRD_PATH"
+    target="/qemu-run.sh"
+  fi
+
   QEMU_COMMAND=(
     qemu-system-x86_64
+    -smp "$CPUS"
     -m "${MEMORY_MB}M"
     -nographic
     -kernel "$KERNEL_PATH"
-    -initrd "$rootfs"
-    -append "console=ttyS0 reboot=k panic=1 nomodules nit.target=/run.sh"
+    -initrd "$initrd"
+    -append "console=ttyS0 reboot=k panic=1 nomodules nit.target=$target"
   )
 
   if [[ "$KERNEL_MODE" == "standard" ]]; then
     forwards="user,id=net0"
-    forwards+=",hostfwd=tcp:127.0.0.1:${APP_PORT}-:${APP_PORT}"
-    forwards+=",hostfwd=tcp:127.0.0.1:49500-:49500"
-    forwards+=",hostfwd=tcp:127.0.0.1:49502-:49502"
+    forwards+=",hostfwd=tcp:${HOST_ADDRESS}:${APP_PORT}-:${APP_PORT}"
+    forwards+=",hostfwd=tcp:${HOST_ADDRESS}:49500-:49500"
+    forwards+=",hostfwd=tcp:${HOST_ADDRESS}:49502-:49502"
     QEMU_COMMAND+=(
       -netdev "$forwards"
       -device virtio-net-pci,netdev=net0
@@ -591,7 +722,10 @@ smoke_endpoints() {
 
 require_linux_amd64
 validate_number "app port" "$APP_PORT" 65535
+validate_number "cpus" "$CPUS" 1024
 validate_number "memory" "$MEMORY_MB" 1048576
+[[ "$HOST_ADDRESS" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
+  || die "--host-address must be an IPv4 address"
 [[ "$APP_PATH" == /* ]] || die "--app-path must begin with /"
 case "$KERNEL_MODE" in
   standard|nitro) ;;
