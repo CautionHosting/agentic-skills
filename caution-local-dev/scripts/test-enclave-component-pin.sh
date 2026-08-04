@@ -421,7 +421,7 @@ build_eif() {
   (
     cd "$APP_DIR"
     "${build_command[@]}"
-  ) | tee "$build_log"
+  ) 2>&1 | tee "$build_log"
 
   BUILD_DIR="$(
     awk -F'Location: ' '/^Location: / { value=$2 } END { print value }' "$build_log"
