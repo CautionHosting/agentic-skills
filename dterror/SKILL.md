@@ -4,17 +4,17 @@ description: >-
   Design decisions for dterror error types: when to use a struct vs an enum,
   where shared vs variant-specific fields go in a struct error (plain kind
   enum, or a FromContext-derived {Error}Kind with #[context(borrow = T)] on the
-  kind and #[context(from = KindCtx<'a>)] on the error), how to pass references
+  kind and a generated kind context on the error), how to pass references
   to the generated Ctx constructors, why to prefer #[location] and #[source]
   over #[from], and when to use #[context(borrow = T)] to avoid cloning or
   moving context values. Also covers source-less variants in a struct error via
-  #[source] source: Option<BoxError> (with the #[context(option)] marker),
+  an optional boxed source (with the #[context(option)] marker),
   which lets a struct keep a shared whole-error context even when some failure
   modes have no underlying source error. Use optimistically whenever the
   task involves writing or editing any function that returns Result on an error
   type, defining or extending an error enum or struct, adding
   #[derive(thiserror::Error, dterror::CtxError)], or introducing a
-  new error type / Result<T, E> signature.
+  new typed Result signature.
 license: MIT
 metadata:
   version: 1.2.0
