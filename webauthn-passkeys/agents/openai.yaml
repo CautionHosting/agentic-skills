@@ -1,4 +1,0 @@
-interface:
-  display_name: "WebAuthn / Passkeys (Caution gateway)"
-  short_description: "Implement, review, and debug WebAuthn/passkey handling in the gateway"
-  default_prompt: "Use $webauthn-passkeys to review or debug the gateway's WebAuthn registration/login ceremonies."

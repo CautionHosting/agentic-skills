@@ -249,27 +249,23 @@ caution {
 
 #### BYOC provisioning
 
-Two paths to set up BYOC:
-
-**CLI-guided (recommended):**
 ```bash
 caution init --byoc    # provisions AWS infra + registers scoped deployment credentials automatically
 ```
 
-**Manual provisioning:**
+`init` needs AWS credentials in the environment and writes an encrypted managed-credentials
+file (`credentials.json.gpg`). If you already have one — provisioned earlier, or handed to you
+by whoever owns the AWS account — point `init` at it instead of re-provisioning:
+
 ```bash
-git clone https://codeberg.org/caution/bring-your-own-cloud-setup.git
-cd bring-your-own-cloud-setup
-cp .env.example .env   # edit with AWS credentials
-docker build -t caution-provisioner-setup .
-docker run --rm --env-file .env -v "$(pwd)/out:/out" caution-provisioner-setup
-# produces credentials.json.gpg in out/
 caution init --byoc --config /path/to/credentials.json.gpg
 ```
 
-For an existing VPC, set `VPC_ID=vpc-xxxxxxxx` in `.env` before running the Docker command.
+To deploy into an existing VPC, set `provider.vpc_id` (and `subnet_ids`/`security_group_id`
+as needed) in the `caution { provider { … } }` block above rather than letting provisioning
+create a new VPC.
 
-The setup creates: a dedicated `/16` VPC with IGW/routing, S3 bucket (`caution-<deployment-id>-images`), EC2 instance role (read EIFs), builder role (publish EIFs), launch template, Auto Scaling Group (starts at 0), and a scoped IAM user with tag-based resource policies.
+Provisioning creates: a dedicated `/16` VPC with IGW/routing, S3 bucket (`caution-<deployment-id>-images`), EC2 instance role (read EIFs), builder role (publish EIFs), launch template, Auto Scaling Group (starts at 0), and a scoped IAM user with tag-based resource policies.
 
 Instance types: m5.xlarge/2xlarge/4xlarge/8xlarge (host reserves ~2 vCPUs, ~2 GB).
 
