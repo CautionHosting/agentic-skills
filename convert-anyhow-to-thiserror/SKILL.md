@@ -1,14 +1,14 @@
 ---
 name: convert-anyhow-to-thiserror
 description: >-
-    Convert a function that returns anyhow::Result<T> (anyhow Result,
-    .context(), bail!, with_context) into Result<T, FooError> where FooError is
+    Convert a function that returns anyhow::Result (anyhow Result,
+    .context(), bail!, with_context) into a typed Result where FooError is
     a new per-function error enum derived with thiserror and dterror's
     CtxError derive (dterror 0.3.0). Call sites wrap failures with
     .with_context(FooErrorCtx::...) instead of .map_err; variants carry
     #[location] and #[source] fields; axum handlers get an IntoResponse impl.
     Use when the user asks to convert a function from anyhow-style error
-    handling to a typed Result<T, Error>, or mentions thiserror, dterror,
+    handling to a typed Result, or mentions thiserror, dterror,
     typed errors, or removing anyhow from a function.
 license: MIT
 ---
