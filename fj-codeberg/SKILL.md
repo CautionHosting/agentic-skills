@@ -302,19 +302,41 @@ Example: `fj actions dispatch publish.yaml main --inputs version=10`
   *private* repos — for public repos, unauthenticated GETs work fine and you
   can skip the auth dance for read-only inspection.
 - **Reusing `fj`'s OAuth token for REST calls.** `fj auth login` (OAuth flow)
-  stores short-lived JWT access + refresh tokens at
-  `~/Library/Application Support/Cyborus.forgejo-cli/keys.json` (macOS) /
-  `~/.local/share/Cyborus.forgejo-cli/keys.json` (Linux). Structure:
-  `{"hosts":{"<instance>":{"token":"<JWT>","refresh_token":"<JWT>","expires_at":[y,doy,h,m,s,ns,...],"type":"OAuth","name":"<user>"}}}`.
+  stores short-lived JWT access + refresh tokens in a `keys.json` under an
+  app-identifier directory that **has changed across `fj` versions** —
+  observed identifiers include `Cyborus.forgejo-cli` and `forgejo-cli.forgejo-cli`,
+  and there may be others in the future. **Do not hardcode one path and trust
+  it.** A stale directory from an old build can sit there for months with an
+  expired token while `fj` itself has long since moved to a new one that's
+  live and auto-refreshing — reading the wrong file looks exactly like "the
+  token is expired and won't refresh," which it isn't. Always glob for every
+  candidate and pick the most recently modified one:
+  ```bash
+  # macOS
+  latest=$(ls -t "$HOME/Library/Application Support/"*forgejo-cli*/keys.json 2>/dev/null | head -1)
+  # Linux
+  latest=$(ls -t "$HOME/.local/share/"*forgejo-cli*/keys.json 2>/dev/null | head -1)
+  echo "$latest"   # sanity check: mtime should be recent (fj rewrites it on refresh)
+  ```
+  Structure: `{"hosts":{"<instance>":{"token":"<JWT>","refresh_token":"<JWT>","expires_at":[y,doy,h,m,s,ns,...],"type":"OAuth"}}}`
+  (top level also has `aliases` and `default_ssh`; `expires_at` is
+  [year, day_of_year, hour, min, sec, ns, ...] and the optional `name` field
+  is often absent).
   The `token` field works as a bearer (`Authorization: token <JWT>`) but
   expires in ~1h. `fj` refreshes it lazily on its own API calls but does
   **not** expose refresh to scripts, and the OAuth client-id for `fj` is read
   from `config/forgejo-cli/client_ids` and is not stable across builds (often
   absent on the host), so you generally can't refresh it from `curl`. If the
-  cached token is expired, either (a) run any `fj` command that hits the API
-  to force a refresh then re-read the file, or (b) fall back to a long-lived
-  application token created at `/user/settings/applications` and registered
-  via `fj auth add-key`. Prefer (b) for scripted REST use.
+  token from the *freshest* file is still expired, either (a) run any `fj`
+  command that hits the API to force a refresh then re-read that same file, or
+  (b) fall back to a long-lived application token created at
+  `/user/settings/applications` and registered via `fj auth add-key`. Prefer
+  (b) for scripted REST use.
+  **Do not go spelunking for the token elsewhere** (macOS Keychain, `.netrc`,
+  `strings` on the binary) once the glob-and-mtime check above is done — those
+  reads get blocked by the sandbox as credential-store probing and burn turns
+  for nothing. If the freshest `keys.json` is itself expired, stop guessing
+  and use (a)/(b) above, or just ask the user to run `fj auth login`.
 - For GETs, use a fetch/web tool (`curl` may be blocked). For writes, prefer `fj`;
   otherwise guide the user to run the command manually.
 

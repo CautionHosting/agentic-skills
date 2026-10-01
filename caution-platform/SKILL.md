@@ -68,7 +68,7 @@ Key points:
 - **`caution apps build` builds the current working directory, but its Docker image tag is derived from `HEAD`.** With the cache enabled, uncommitted application/Containerfile changes can therefore reuse an image built from older content. The EIF cache key also includes the parsed deployment configuration, so an uncommitted `caution.hcl` change does not reuse an EIF with different generated `run.sh` configuration. Use a clean committed tree for reproducible evidence; use `--no-cache` when intentionally testing working-tree changes or a newly compiled `DEFAULT_*_COMMIT`.
 - `caution apps create` creates the app record on Caution (done during `caution init`); it is not the deploy mechanism itself.
 - These commands are **interactive** (FIDO2/WebAuthn signing) — wrapping them in a Makefile/CI adds little and can't be fully automated. Keep ops Makefiles to local build/test/reproducibility (`go build`, `vite build`, the two-build `cmp` repro check) and run the `caution` commands directly.
-- **Commit** `.caution/deployment.json` (app resource ID, needed for CLI to target the right app), `.caution/quorum-bundle.json`, and `.caution/secrets/*.asc`. **Do not commit** plaintext inputs (`.env`) or generated private keyrings (e.g. `alice.private.asc`). Build output (EIF files) should remain gitignored.
+- **Commit** `.caution/deployment.json` (app resource ID, needed for CLI to target the right app), `.caution/quorum-bundle.json`, `.caution/keymaker-pcr-policy.json` for V1, and `.caution/secrets/*.asc`. **Do not commit** plaintext inputs (`.env`) or generated private keyrings (e.g. `alice.private.asc`). Build output (EIF files) should remain gitignored.
 - **Alpha access**: registration requires an access code: `caution register --alpha-code <your_code>`. Request one at `info@caution.co`. Passkey required (browser/platform/password-manager/YubiKey/NitroKey/LibremKey).
 - **Platform support**: CLI runs on Linux (x86_64) or macOS (arm64). On macOS Apple Silicon, enable Rosetta in Docker Desktop for `caution verify` (x86_64/amd64 emulation).
 
@@ -194,7 +194,7 @@ resources {
   browser/WASM + Rust release gate, read
   [references/steve-nitro.md](references/steve-nitro.md).
 
-- **Secrets (Locksmith)** — reference a managed secret with `env::vault("NAME")` in a unit's `env` map. **Using `env::vault` anywhere automatically enables Locksmith — there is no separate flag.** Prefer this over baking secrets into the image. **The app image must include `/etc/caution/bundle.json`** (the quorum bundle from `caution secret new`, stored at `.caution/quorum-bundle.json`) and `/etc/caution/secrets/*.asc` — `locksmithd` reads the bundle at startup and panics with `No such file or directory` if absent. `ADD` them explicitly: `ADD .caution/quorum-bundle.json /etc/caution/bundle.json` and `ADD .caution/secrets/ /etc/caution/secrets/`. **Do not set `binary`** — it strips `/etc/caution/`, so locksmithd still panics. Build from the full `containerfile` image; a `scratch` image with the static binary + bundle + encrypted secrets stays minimal and lets PCR2 measure the bundle. Locksmithd listens on reserved port 49504 for shard submissions.
+- **Secrets (Locksmith)** — `env::vault("NAME")` in a unit's `env` map automatically enables Locksmith; there is no separate flag. It does not copy files into the image. Include the complete bundle at `/etc/caution/bundle.json`, the verified V1 generation policy at `/etc/caution/keymaker-pcr-policy.json`, and encrypted values under `/etc/caution/secrets/`. ImportedV0 needs no Keymaker policy. Use the full `containerfile` image; `build.binary` discards these files. Locksmith listens on reserved port 49504; do not configure that ingress yourself. See [Locksmith](#locksmith-caution-secret) below for creation, packaging and release commands.
 
   ```hcl
   unit "default" {
@@ -612,105 +612,128 @@ rm -rf ~/.cache/caution/reproductions/local/<app_commit>/
 
 ## Locksmith (`caution secret`)
 
-Caution's secret management uses Shamir secret sharing: a master secret is split into shards encrypted to OpenPGP keys, with a configurable quorum threshold. Shard-holders independently send shards to the enclave; once the threshold is met, the enclave reconstructs the secret and derives cryptographic keys.
+Follow the [Key Services guide](https://docs.caution.co/concepts/key-services/) for the current setup flow. Reuse an existing quorum bundle when changing secrets or restarting an enclave. Keymaker is needed only to create a new quorum; a timeout or lost generation response is an unknown outcome, so check for a saved bundle before another explicit attempt.
 
-### Components
+External-PGP holders keep their private keys. Passkey holders authorize keys derived inside the key-service enclave, which re-encrypts their shares to the verified application. Distinct holders contribute to the same threshold; multiple passkeys for one holder remain one share. After recovery, locksmithd starts keyforkd and locksmith-oneshot decrypts the application values.
 
-- **Keymaker** — setup-time component that generates the quorum (master secret split into shards). Deployed from the Locksmith repo (`https://codeberg.org/caution/locksmith`). Health check: `$KEYMAKER_URL/health` returns `{"service":"keymaker","status":"ok"}`.
-- **Locksmithd** — runs inside the enclave at startup on reserved port **49504**. Reads `/etc/caution/bundle.json`, verifies signed shards via Nitro attestation, reconstructs the master secret, then starts **keyforkd** (key derivation daemon).
-- **Locksmith-oneshot** — after keyforkd starts, runs once to derive an OpenPGP key, decrypt all `.asc` files in `/etc/caution/secrets/`, and output `export KEY=value` statements. The enclave startup script sources this: `source <(/usr/bin/locksmith-oneshot)`.
+### Creating or downloading a bundle
 
-### Deploying Keymaker
+Managed creation uses Platform's hosted Keymaker when neither `--keymaker-url` nor `KEYMAKER_URL` is set. Both PGP-only and mixed/passkey quorums are supported. From the initialized application checkout, with Alice's PGP key and Bob's passkey registered in the selected organization:
 
 ```bash
-git clone https://codeberg.org/caution/locksmith
-cd locksmith
-caution init
-git push caution main
+caution login
+caution verify --service keymaker
+env -u KEYMAKER_URL caution secret init \
+  --holder alice=external-pgp --holder bob=webauthn --threshold 2 \
+  --name "Application secrets"
 ```
 
-After deployment, set `KEYMAKER_URL` to the deployed Locksmith application URL.
+Review the holders, approval methods and threshold before authorizing creation. Set the threshold explicitly: the CLI defaults to one; the dashboard defaults to two. If a holder has several PGP keys, use `--pgp-key alice=FULL_REGISTERED_PGP_FINGERPRINT`. `--max`, when supplied, must match the combined holder count. A local public-only keyring can also be combined with `--holder` selections.
 
-### Generating a quorum (`caution secret new`)
-
-`caution secret new keyring.asc --threshold N --max M` calls the keymaker service to mint a quorum bundle. It requires each OpenPGP certificate in the keyring to have a **signing subkey**, an **encryption subkey**, and an **authentication subkey** — all three.
-
-Default `gpg --full-generate-key` on macOS (and Linux) produces only a certify primary + signing primary + encryption subkey — no auth subkey, and no dedicated signing *sub*key:
-
-```
-pub  ed25519  [SC]
-sub  cv25519  [E]      ← present
-                       ← authentication subkey missing
-                       ← signing subkey missing → "keyring contains no Keymaker-eligible public certificates"
-```
-
-To add both missing subkeys (must be done for every shard-holder key):
+The CLI saves `.caution/quorum-bundle.json` and `.caution/keymaker-pcr-policy.json`. Alternatively, create a bundle in **Secrets → Create quorum bundle** and download the complete JSON as `.caution/quorum-bundle.json`. Dashboard creation does not encrypt application values or collect holders' release approvals. For a download, package the independently verified generation policy; if the project has no existing policy, export it from the exact Keymaker trust file printed by successful service verification:
 
 ```bash
-gpg --expert --edit-key alice@example.com
-# Add signing subkey:
-# gpg> addkey → (11) ECC (set your own capabilities) → leave Sign ON, toggle Encrypt/Auth OFF → Curve 25519 → save
-# Add authentication subkey:
-# gpg> addkey → (11) ECC (set your own capabilities) → toggle Sign OFF, Authenticate ON → Curve 25519 → save
-# gpg> save
+jq '.policy' /path/to/saved/keymaker.json > .caution/keymaker-pcr-policy.json
+caution secret inspect --bundle .caution/quorum-bundle.json
 ```
 
-For test/dev keys, use `caution secret keygen --shoot-self-in-foot` instead — it generates a compliant key (S+E+A subkeys) directly. The `--shoot-self-in-foot` flag is an explicit unsafe acknowledgement that writes unencrypted private keyrings; never use for production shard holders.
+Keep the complete bundle; do not extract a top-level `public_key` field or discard its proof. `secret inspect` reports holder fingerprints, threshold and generation evidence. Retain the historical verified policy for an existing bundle; verifying today's Keymaker cannot establish missing trust in an older generation image.
+
+### Manual PGP creation
+
+Deploy and verify your Keymaker in a **separate checkout/application**, following the guide's [manual setup](https://docs.caution.co/concepts/key-services/#self-hostedmanual). Return to the application checkout before generating its bundle. Export only public holder certificates, each with signing, encryption and authentication keys:
+
+```bash
+gpg --armor --export alice@example.com bob@example.com > keyring.asc
+caution secret init keyring.asc --threshold 2 --max 2 \
+  --keymaker-url https://YOUR_KEYMAKER \
+  --keymaker-pcr-policy /path/to/keymaker-checkout/.caution/trusted_hashes.json \
+  --no-upload
+```
+
+Use the Keymaker checkout's trusted hashes only after successful verification; the CLI saves a normalized `sets` policy beside the bundle. `--no-upload` keeps creation local; omit it to upload after authentication. A failed upload does not require regenerating a saved bundle. Either the explicit URL or `KEYMAKER_URL` selects direct PGP-only mode; `KEYMAKER_URL` is not required for managed creation. `caution secret new` remains an alias for `caution secret init`.
+
+For development keys only:
 
 ```bash
 caution secret keygen alice.asc --name "Alice" --email alice@example.com --shoot-self-in-foot
-# Also writes alice.private.asc for later shard submission
 ```
 
-Verify before exporting:
-```bash
-gpg --list-keys --with-colons alice@example.com | grep '^sub'
-# must show all three:  sub … s … ed25519   (signing)
-#                       sub … e … cv25519   (encryption)
-#                       sub … a … ed25519   (authentication)
+This creates `alice.asc` and an unencrypted `alice.private.asc`. Never commit the private keyring or use it for production holders; use OpenPGP smartcards for production external-PGP keys. See the guide for keyring preparation.
+
+### Trust and image inputs
+
+Keep three policies distinct: Keymaker generation measurements verify V1 bundle proofs; application measurements in `.caution/trusted_hashes.json` authorize the destination; the key-service live policy authorizes passkey release. Obtain measurements through independent verification, not by copying a failing endpoint's PCRs or substituting all-zero QEMU measurements.
+
+For generation, Keymaker policy precedence is `--keymaker-pcr-policy`, `KEYMAKER_PCR_POLICY_PATH`, `.caution/keymaker-pcr-policy.json`, then shared Platform trust. Encryption and release have no `--keymaker-pcr-policy` flag; use the environment, project policy or saved trust. `secret inspect` and encryption do not initiate discovery. Client trust setup does not update operator policies or files already packaged in an enclave.
+
+Reference each secret with `env::vault("NAME")` and copy these inputs into the **final image stage** for V1:
+
+```dockerfile
+COPY .caution/quorum-bundle.json /etc/caution/bundle.json
+COPY .caution/keymaker-pcr-policy.json /etc/caution/keymaker-pcr-policy.json
+COPY .caution/secrets/ /etc/caution/secrets/
 ```
 
-Export to keyring:
-```bash
-gpg --armor --export alice@example.com bob@example.com > keyring.asc
-export KEYMAKER_URL=https://your-locksmith-deployment.example
-caution secret new keyring.asc --threshold 2 --max 2   # writes .caution/quorum-bundle.json
-```
-
-`--max` must match the number of certificates in the keyring. If `KEYMAKER_URL` is unset, the CLI exits with `KEYMAKER_URL environment variable is required`.
-
-The public key for encrypting secrets is in the `public_key` field of the bundle:
-```bash
-jq -r '.public_key' .caution/quorum-bundle.json > recipient.asc
-```
+`env::vault` enables Locksmith but does not copy files. Do not use `build.binary`, which discards this filesystem. Normalize public/encrypted files to `0644` and directories to `0755`. ImportedV0 needs the imported bundle and ciphertext only; no Keymaker policy is required for its CLI, image preflight or runtime.
 
 ### Encrypting secrets (`caution secret encrypt`)
 
-Encrypts values from a `.env` file to the quorum's public key, writing one armored OpenPGP message per non-empty value to `.caution/secrets/<KEY>.asc`:
+Encrypt values from a private `.env` file with the existing bundle:
 
 ```bash
-caution secret encrypt                    # reads .env, writes .caution/secrets/*.asc
+caution secret encrypt                       # reads .env, writes .caution/secrets/*.asc
 caution secret encrypt DATABASE_URL API_KEY   # encrypt only selected keys
 caution secret encrypt --env-file ./prod.env --bundle ./.caution/quorum-bundle.json --secrets-dir ./.caution/secrets
 ```
 
-The filename (minus `.asc`) becomes the environment variable name. `.caution/quorum-bundle.json` and `.caution/secrets/*.asc` are safe to commit (encrypted to the enclave-only key). Do not commit plaintext `.env` or private keyrings.
+Each non-empty value becomes `.caution/secrets/<KEY>.asc`; the filename determines the environment variable. Locksmith currently trims leading/trailing whitespace when exporting decrypted values. Commit the complete bundle, public policies and encrypted `.asc` files, keeping plaintext env files and private keys outside Git. Updating a value requires rebuilding/redeploying, verifying the new application image and collecting shares again, using the same bundle.
 
 ### Sending shards (`caution secret send-shard`)
 
-!!! warning "Temporary CLI build requirement"
-    `caution secret send-shard` currently requires the **host-toolchain untrusted CLI build** (`make install-cli-untrusted`) because the StageX-reproducible default CLI hits a musl static-linking limitation with PC/SC `libpcsclite_real.so.1`. "Untrusted" means not built via StageX — it inherits host-toolchain supply-chain risks. Production shard-holders use YubiKey/smart cards.
+Use the host-toolchain CLI: `make install-cli` (also `make install-cli-host`). It inherits host-toolchain/library risks and does not have StageX's reproducibility or full-source-bootstrap guarantees. `make install-cli-stagex` can hit the PC/SC `libpcsclite_real.so.1` static-linking limitation on the shard-sending path.
+
+After deploying the application, verify its live image before release:
 
 ```bash
-# Development:
+caution verify
+caution secret inspect
+# External PGP: each holder uses their own smartcard or private keyring.
+caution secret send-shard --holder CERTIFICATE_FINGERPRINT
 caution secret send-shard --keyring alice.private.asc
-caution secret send-shard --keyring bob.private.asc    # repeat per holder
-
-# Production (smart card / YubiKey):
-caution secret send-shard    # CLI finds the connected card, prompts for PIN
 ```
 
-The command looks up the enclave's public IP, reads the bundle, connects on port 49504, verifies the Nitro attestation, encrypts and sends the shard, and reports whether the quorum threshold has been met.
+For passkey holders, establish key-service trust on the selected Platform, then choose browser/QR or native USB FIDO2 approval:
+
+```bash
+caution verify --service key-service
+caution --qr secret send-shard --holder CERTIFICATE_FINGERPRINT
+# Native USB FIDO2 alternative:
+caution secret send-shard --holder CERTIFICATE_FINGERPRINT
+```
+
+Explicit service configuration uses `--recryptor-url` and `--recryptor-pcr-policy`; verify that endpoint's policy independently. Compare release details and wait for the destination acknowledgement. Creation approval does not count as a release, and repeated submissions by one holder do not meet a multi-holder quorum. New passkeys registered after bundle creation cannot authorize release for that unchanged bundle.
+
+After an application restart, holders must release shares again. A key-service restart requires its operators to recover the existing root before passkey releases work; do not generate a replacement root. For receiver clock errors, check signer/enclave clocks: external-PGP signatures permit up to 60 seconds of future skew. Receiver upgrades require rebuilding, redeploying and verifying the application; changing the CLI alone does not update the running enclave.
+
+### Existing V0 PGP bundles
+
+Raw V0 requires a one-time holder-assisted import; it preserves the quorum key and existing ciphertext and has no Keymaker generation proof:
+
+```bash
+caution secret import-legacy --bundle /path/original-v0.json --keyring /path/holder.private.asc
+# Smartcard alternative: omit --keyring and use --holder FULL_FINGERPRINT.
+caution secret inspect --bundle .caution/quorum-bundle.json
+```
+
+Import refuses to overwrite its output; use `--output PATH` when needed and retain the original. Package the imported artifact at `/etc/caution/bundle.json` with the existing ciphertext, rebuild/redeploy and verify the application. Do not regenerate the quorum or re-encrypt unchanged values. ImportedV0 supports external PGP only; use explicit legacy acceptance for each encryption or release:
+
+```bash
+caution secret encrypt DATABASE_URL --env-file /private/app.env --allow-legacy
+caution secret send-shard --holder FULL_FINGERPRINT --allow-legacy
+```
+
+`secret inspect` needs neither a Keymaker policy nor `--allow-legacy` for ImportedV0. Failed V1 proof verification must never fall back to legacy acceptance.
 
 ## Common Failures
 
@@ -729,8 +752,8 @@ The command looks up the enclave's public IP, reads the bundle, connects on port
 | `caution verify` fails: `Failed to extract tar archive … failed to unpack etc/hostname … Permission denied` | The app Containerfile used `COPY --chmod=0644 <file> /etc/.../<file>`; `--chmod` also set the auto-created parent dirs (`/etc`, `/etc/pq`) to `0644` (no `x`). The enclave runs (root bypasses), but `caution verify` extracts the app tar as your non-root user and can't traverse the dir. | Drop `--chmod`; set the file mode in a build stage and `COPY --from=build` it, so parents are created at `0755`. Clear the crashed repro cache: `rm -rf ~/.cache/caution/reproductions/local/<app_commit>-*`. |
 | Port forwarding not working in QEMU | `pci=off` in kernel cmdline, or Nitro kernel (no virtio-net driver) | Use standard kernel, remove `pci=off` |
 | App image build fails with `wget: error getting response: Connection reset by peer` | busybox `wget` has no TLS — can't fetch `https://` URLs inside a stagex pallet | Vendor the tarball locally: `curl -sL <url> -o file.tar.gz`, commit it, use `COPY file.tar.gz .` instead of `wget` in the Containerfile |
-| `locksmithd` panics: `has bundle: No such file or directory` | Two causes: (a) the app image is missing `/etc/caution/bundle.json` — using `env::vault` does not inject it; or (b) the bundle IS `ADD`ed but `build` sets `binary`, which extracts only that one file and drops `/etc/caution/`. | (a) `ADD .caution/quorum-bundle.json /etc/caution/bundle.json` and `ADD .caution/secrets/ /etc/caution/secrets/` in the Containerfile. (b) Remove `binary` and deploy via `containerfile` so the full image filesystem becomes the EIF rootfs. |
-| `keyring contains no Keymaker-eligible public certificates` during `caution secret new` | Key(s) missing a signing, encryption, or authentication subkey (all three required) | For dev keys: `caution secret keygen --shoot-self-in-foot`. For GPG keys: add a signing subkey and an auth subkey via `gpg --expert --edit-key`. See Locksmith section above. |
+| `locksmithd` panics: `has bundle: No such file or directory` | The final image lacks `/etc/caution/bundle.json`, or `build.binary` discarded its filesystem | Copy the complete bundle, encrypted secrets and (for V1) verified Keymaker policy as shown above. Use the full `containerfile` image; `env::vault` does not copy files. |
+| `keyring contains no Keymaker-eligible public certificates` during `caution secret init` | A holder certificate lacks signing, encryption or authentication keys | Prepare eligible public holder certificates; use `caution secret keygen --shoot-self-in-foot` only for development. See the Key Services guide for keyring preparation. |
 | `no match for platform in manifest: not found` during `caution apps build` | StageX images are linux/amd64 only; on an arm64 host (e.g. Apple Silicon) the builder defaults to arm64 | Build inside an amd64 environment, or add `--platform=linux/amd64` to every `FROM` line in the Containerfile: `FROM --platform=linux/amd64 stagex/...` |
 | EIF build fails at `Containerfile.eif` step `mkdir: can't create directory '/build/initramfs/bin': No such file or directory` (also hits `/lib`, `/etc/ssl/certs`) | The app image's `/bin`,`/lib`,`/sbin` are **dangling symlinks into `/usr`**. `stagex/core-filesystem` ships them as `bin -> usr/bin` etc., but a **fully static** app (no busybox/musl pallet in the final stage) never populates `usr/bin`,`usr/lib`,`usr/sbin`. The platform packer does `test -e /build/initramfs/bin || mkdir -p …`; `test -e` is false on a dangling link and `mkdir -p` through it fails ENOENT. Confirm by exporting the image: `docker export <img> \| tar -tv \| grep -E ' (bin\|usr/bin)'` shows `bin -> usr/bin` with no `usr/bin/` dir. | Materialize the symlink targets in the app image so they resolve. In a build stage that has a shell, `install -d /staged/usr/bin /staged/usr/lib /staged/usr/sbin /staged/etc/ssl/certs` into the tree you `COPY` into the final stage (created in-container, so modes are deterministic — don't use `COPY --chmod`). Then `test -e` sees the real `usr/*` dir and skips the `mkdir`. |
 | buildx lint warning `FromPlatformFlagConstDisallowed: FROM --platform flag should not use constant value "linux/amd64"` | You pinned `--platform=linux/amd64` on `FROM` (the fix above) | **Benign — don't "fix" it.** The constant pin is deliberate for amd64-only StageX images; it prevents the arm64 default footgun. The build proceeds and stays reproducible. |
