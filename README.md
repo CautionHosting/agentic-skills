@@ -1,3 +1,5 @@
+This repository may be mirrored on other Git forges. The [canonical repository](https://git.caution.co/public/agentic-skills) is hosted on git.caution.co. Please open issues and pull requests there.
+
 # Caution Agentic Skill
 
 AI assistant skills for building, operating, and maintaining Caution software and verifiable enclave applications. Published at [codeberg.org/caution/agentic-skills](https://codeberg.org/caution/agentic-skills).
