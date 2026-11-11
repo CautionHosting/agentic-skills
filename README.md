@@ -6,7 +6,7 @@ AI assistant skills for building, operating, and maintaining Caution software an
 
 | Skill | Audience | What it covers |
 |---|---|---|
-| [`caution-formal-verification`](./caution-formal-verification/SKILL.md) | Rust devs | Human-readable Verus proofs of production code, explicit trust boundaries, targeted tests, and reviewable proof PRs |
+| [`caution-formal-verification`](./caution-formal-verification/SKILL.md) | Rust devs | Thin Caution wrapper around pinned VOSTD guidelines and upstream KVerus skills, with external setup instructions and project-specific verification gates |
 | [`stagex-reproducible-builds`](./stagex-reproducible-builds/SKILL.md) | App builders | Reproducible, verifiable container images with [StageX](https://stagex.tools) — pallet selection, digest pinning, hermetic Rust/Go/C/C++ builds, PCR reproducibility verification |
 | [`caution-platform`](./caution-platform/SKILL.md) | App builders | Authoring `caution.hcl`, deploying and debugging Caution enclave apps — local QEMU, AWS Nitro, attestation testing, Locksmith secrets, STEVE encryption, PCR verification |
 | [`caution-local-dev`](./caution-local-dev/SKILL.md) | Platform devs | Running the Caution **platform itself** locally — api/gateway/postgres, Docker cgroup fixes, alpha/beta codes, e2e tests, image rebuilds |
