@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ryan's Rust Style"
+  short_description: "Apply Rust conventions evidenced in Keyfork"
+  default_prompt: "Use $ryansquared-rust-style to write or review Rust using the evidenced Keyfork conventions, while respecting this repository's rules and the dterror skill."

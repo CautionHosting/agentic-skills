@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "repository": "keyfork",
+  "local_path_hint": "~/git/keyfork",
+  "snapshots": {
+    "main": "b2bc327fdfa4c55729161a28548c9aa5df9a9756",
+    "tui": "c9d8eaa8f75679abc21a4e240eed4723c37eb7eb"
+  },
+  "author_emails": ["ryan@distrust.co", "ryan@caution.co"],
+  "notes": [
+    "Git attribution is not proof of sole personal authorship or endorsement.",
+    "The tui snapshot is origin/ryansquared/openpgp-tui at analysis time, not merged main.",
+    "Anchors are exact source substrings. Rule mapping describes supporting evidence, not exhaustive proof of every recommendation.",
+    "Imported keyfork-openpgp-card-sequoia code is excluded as evidence of personal Rust style."
+  ],
+  "evidence": [
+    {
+      "id": "E01", "rules": ["R1"], "snapshot": "main",
+      "path": "docs/src/dev-guide/handling-data.md",
+      "anchor": "### `Mnemonic::as_bytes()`",
+      "observation": "Explicit guide distinguishing borrowed, owned-copy, and consuming APIs, including into_parts and computed seed."
+    },
+    {
+      "id": "E02", "rules": ["R1", "R7"], "snapshot": "main",
+      "path": "crates/util/keyfork-mnemonic/src/lib.rs",
+      "anchor": "pub fn into_bytes(self) -> Vec<u8>",
+      "observation": "Implementation of documented as_bytes/to_bytes/into_bytes ownership variants."
+    },
+    {
+      "id": "E03", "rules": ["R2", "R4", "R7", "R9"], "snapshot": "main",
+      "path": "crates/derive/keyfork-derive-util/src/index.rs",
+      "anchor": "pub const fn new(index: u32, hardened: bool) -> Result<Self>",
+      "observation": "Validated domain constructor, FromStr and Display implementations, rustdoc and boundary/roundtrip tests."
+    },
+    {
+      "id": "E04", "rules": ["R1", "R2", "R4", "R9"], "snapshot": "main",
+      "path": "crates/derive/keyfork-derive-util/src/path.rs",
+      "anchor": "pub fn chain_push(mut self, index: DerivationIndex) -> Self",
+      "observation": "Collection accessors, consuming builder, fallible iterator collection and parse/format tests. Add impls also illustrate unnecessary legacy cloning."
+    },
+    {
+      "id": "E05", "rules": ["R3", "R6", "R7"], "snapshot": "main",
+      "path": "crates/derive/keyfork-derive-util/src/private_key.rs",
+      "anchor": "pub trait PrivateKey: Sized",
+      "observation": "Associated public-key/error types, feature-gated algorithm implementations, documented methods and local arithmetic exception."
+    },
+    {
+      "id": "E06", "rules": ["R3"], "snapshot": "main",
+      "path": "crates/util/keyfork-prompt/src/lib.rs",
+      "anchor": "pub trait PromptHandler",
+      "observation": "Interaction capability with alternative backends. This file also contains another author's contributions, not all attributed to Ryan."
+    },
+    {
+      "id": "E07", "rules": ["R3", "R6", "R7", "R9"], "snapshot": "main",
+      "path": "crates/util/keyfork-frame/src/lib.rs",
+      "anchor": "pub fn try_encode_to(data: &[u8], writable: &mut impl Write)",
+      "observation": "Generic standard I/O, checked length arithmetic and u32 conversion, public contracts, wire snapshot and refusal tests."
+    },
+    {
+      "id": "E08", "rules": ["R3", "R7", "R9"], "snapshot": "main",
+      "path": "crates/util/keyfork-frame/src/asyncext.rs",
+      "anchor": "async fn test_async_encode_equivalency_with_sync()",
+      "observation": "Sync/async protocol parity test. Comments explain initialized buffer length. Overflow test allocates roughly 4 GiB and is not a pattern to copy."
+    },
+    {
+      "id": "E09", "rules": ["R1", "R4", "R6"], "snapshot": "main",
+      "path": "crates/util/smex/src/lib.rs",
+      "anchor": "pub fn decode(input: impl AsRef<str>)",
+      "observation": "Normalize borrowed representation once, return early on invalid length, transform chunks through fallible collection, explain bounded arithmetic."
+    },
+    {
+      "id": "E10", "rules": ["R4", "R10"], "snapshot": "main",
+      "path": "Cargo.toml",
+      "anchor": "# sometimes i like the logical flow of keeping things in an \"else\"",
+      "observation": "Explicit preference underlying redundant_else allowance, plus workspace Clippy and documentation settings."
+    },
+    {
+      "id": "E11", "rules": ["R3", "R10"], "snapshot": "main",
+      "path": "crates/derive/keyfork-derive-util/Cargo.toml",
+      "anchor": "[lints]\nworkspace = true",
+      "observation": "Workspace lint and dependency inheritance with optional algorithm features."
+    },
+    {
+      "id": "E12", "rules": ["R6"], "snapshot": "main",
+      "path": "crates/util/keyfork-prompt/src/terminal.rs",
+      "anchor": "let printable_space = usize::from(cols).saturating_sub(prefix_length);",
+      "observation": "Saturation for terminal geometry. Author-owned arithmetic change checked independently in 8d3a512."
+    },
+    {
+      "id": "E13", "rules": ["R8"], "snapshot": "main",
+      "path": "crates/derive/keyfork-derive-util/src/extended_key/private_key.rs",
+      "anchor": ".field(\"private_key\", &\"obscured\")",
+      "observation": "Custom secret-redacting Debug. Other fields remain visible and deserialization contains expect calls, so not a blanket security endorsement."
+    },
+    {
+      "id": "E14", "rules": ["R9"], "snapshot": "main",
+      "path": "crates/derive/keyfork-derive-util/src/tests.rs",
+      "anchor": "use keyfork_slip10_test_data::{test_data, Test};",
+      "observation": "Known-answer vectors check private/public keys and chain codes through multiple public entry points."
+    },
+    {
+      "id": "E15", "rules": ["R5"], "snapshot": "main",
+      "path": "crates/util/keyfork-bin/src/lib.rs",
+      "anchor": "pub type ProcessResult<T = ()> = Result<T, Box<dyn std::error::Error>>;",
+      "observation": "Legacy boxed binary boundary with error source-chain reporting, in contrast to newer TUI errors."
+    },
+    {
+      "id": "E16", "rules": ["R5", "R7"], "snapshot": "tui",
+      "path": "crates/openpgp/keyfork-openpgp-tui/src/error.rs",
+      "anchor": "pub enum ReconstituteError",
+      "observation": "Explicit operation-level dterror convention, source/location and borrowed context fields, with a top-level wrapping error."
+    },
+    {
+      "id": "E17", "rules": ["R5", "R8"], "snapshot": "tui",
+      "path": "crates/openpgp/keyfork-openpgp-tui/src/terminal.rs",
+      "anchor": "impl Drop for TerminalSession",
+      "observation": "Owning resource guard with best-effort cleanup, plus explicit fallible lifecycle methods using Ctx and with_context."
+    },
+    {
+      "id": "E18", "rules": ["R2", "R3", "R7"], "snapshot": "tui",
+      "path": "crates/openpgp/keyfork-openpgp-tui/src/event.rs",
+      "anchor": "pub enum Action",
+      "observation": "Typed effects separating key decisions from external work, including structured recovery data."
+    },
+    {
+      "id": "E19", "rules": ["R2", "R4", "R5", "R7", "R8"], "snapshot": "tui",
+      "path": "crates/openpgp/keyfork-openpgp-tui/src/source.rs",
+      "anchor": "const MAX_FETCH_BYTES: u64 = 1 << 20;",
+      "observation": "Source enums and parser, finite request timeout/read cap, typed refusal and precisely limited fallback behavior."
+    },
+    {
+      "id": "E20", "rules": ["R1", "R7"], "snapshot": "tui",
+      "path": "crates/openpgp/keyfork-openpgp-tui/src/cert.rs",
+      "anchor": "pub fn text(name: impl Into<String>, value: impl Into<String>) -> Self",
+      "observation": "Owned input conversion for a data type; module docs explain mutation invariants and refusal semantics."
+    },
+    {
+      "id": "E21", "rules": ["R9"], "snapshot": "tui",
+      "path": "crates/openpgp/keyfork-openpgp-tui/tests/tui.rs",
+      "anchor": "env!(\"CARGO_BIN_EXE_keyfork-openpgp-tui\")",
+      "observation": "Actual binary driven through a PTY with timed waits and exported-certificate checks using gpg and sq."
+    },
+    {
+      "id": "E22", "rules": ["R5"], "snapshot": "tui",
+      "path": "crates/openpgp/keyfork-openpgp-util/src/error.rs",
+      "anchor": "Keyring(#[from] keyring::Error)",
+      "observation": "Counterexample: even the newer branch retains older thiserror/from conventions outside the TUI."
+    }
+  ],
+  "history": [
+    {"commit": "2e3c387", "supports": ["R1"], "description": "Explicit data-access naming guide"},
+    {"commit": "e7a776f", "supports": ["R4", "R10"], "description": "Workspace lint choices and Clippy cleanup"},
+    {"commit": "8d3a512", "supports": ["R6"], "description": "Saturating terminal geometry calculations"},
+    {"commit": "60b80c0", "supports": ["R6"], "description": "Checked threshold arithmetic, with legacy panic handling not recommended for external input"},
+    {"commit": "472d028", "supports": ["R7", "R8"], "description": "Introduces explicit bug diagnostics for historical invariant panics, not a no-panic convention"},
+    {"commit": "85626ad", "supports": ["R9"], "description": "Adds framing tests including sync/async equivalence"},
+    {"commit": "75a8536", "supports": ["R5", "R7", "R8", "R9"], "description": "Newer TUI and helper hardening with behavioral tests"}
+  ]
+}

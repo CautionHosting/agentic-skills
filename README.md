@@ -9,6 +9,7 @@ AI assistant skills for building, operating, and maintaining Caution software an
 | [`stagex-reproducible-builds`](./stagex-reproducible-builds/SKILL.md) | App builders | Reproducible, verifiable container images with [StageX](https://stagex.tools) — pallet selection, digest pinning, hermetic Rust/Go/C/C++ builds, PCR reproducibility verification |
 | [`caution-platform`](./caution-platform/SKILL.md) | App builders | Authoring `caution.hcl`, deploying and debugging Caution enclave apps — local QEMU, AWS Nitro, attestation testing, Locksmith secrets, STEVE encryption, PCR verification |
 | [`caution-local-dev`](./caution-local-dev/SKILL.md) | Platform devs | Running the Caution **platform itself** locally — api/gateway/postgres, Docker cgroup fixes, alpha/beta codes, e2e tests, image rebuilds |
+| [`ryansquared-rust-style`](./ryansquared-rust-style/SKILL.md) | Rust devs | Evidence-backed Rust conventions from ryansquared's Keyfork work, with ownership APIs, domain types, operation errors, arithmetic, docs, and tests |
 | [`dterror`](./dterror/SKILL.md) | Rust devs | Designing function-specific typed errors with thiserror and dterror 0.3 |
 | [`convert-anyhow-to-thiserror`](./convert-anyhow-to-thiserror/SKILL.md) | Rust devs | Converting one anyhow-returning function to a typed dterror error |
 | [`convert-anyhow-to-thiserror-codepaths`](./convert-anyhow-to-thiserror-codepaths/SKILL.md) | Rust devs | Migrating an entry function's repo-local anyhow call graph one function at a time |
